@@ -1,26 +1,4 @@
-def get_stock_code(input_text):
-    """取得股票代號，支援代號或名稱輸入（動態查詢）"""
-    input_text = input_text.strip()
-    
-    # 確保股票清單已載入
-    if not STOCK_CODES:
-        fetch_stock_list()
-    
-    # 先嘗試直接匹配代號
-    if input_text in STOCK_CODES:
-        return input_text, STOCK_CODES[input_text]
-    
-    # 再嘗試匹配名稱
-    if input_text in STOCK_NAMES:
-        return STOCK_NAMES[input_text], input_text
-    
-    # 嘗試部分匹配名稱
-    for name, code in STOCK_NAMES.items():
-        if input_text in name or name in input_text:
-            return code, name
-    
-    # 如果本地找不到，嘗試從網路搜尋
-    print(f"本地找不到 {input_text}，from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify
 import os
 import json
 import re
@@ -51,6 +29,12 @@ voting_sheet = None
 # 儲存進行中的投票（實際部署應該用資料庫）
 active_votes = {}
 user_daily_votes = {}
+
+# 股票清單快取（動態爬取後儲存）
+STOCK_CODES = {}
+STOCK_NAMES = {}
+STOCK_CACHE_TIME = None
+CACHE_DURATION = 3600  # 快取1小時
 
 def init_google_sheets():
     global transaction_sheet, holdings_sheet, voting_sheet
@@ -94,43 +78,302 @@ def init_google_sheets():
         print(f"❌ Google Sheets 初始化失敗: {e}")
         return False
 
+def get_fallback_stock_list():
+    """備用股票清單（基本的熱門股票）"""
+    return {
+        # 熱門上市股票
+        '2330': '台積電',
+        '2454': '聯發科',
+        '2317': '鴻海',
+        '2412': '中華電',
+        '2882': '國泰金',
+        '2881': '富邦金',
+        '2886': '兆豐金',
+        '2891': '中信金',
+        '2308': '台達電',
+        '2303': '聯電',
+        '2603': '長榮',
+        '2609': '陽明',
+        '2615': '萬海',
+        '3008': '大立光',
+        '2002': '中鋼',
+        '2357': '華碩',
+        '2382': '廣達',
+        '1301': '台塑',
+        '1303': '南亞',
+        '2884': '玉山金',
+        '2885': '元大金',
+        '2892': '第一金',
+        '6505': '台塑化',
+        '2207': '和泰車',
+        '2395': '研華',
+        '3711': '日月光投控',
+        '2379': '瑞昱',
+        '2327': '國巨',
+        '2345': '智邦',
+        '2377': '微星',
+        '1216': '統一',
+        '1229': '聯華',
+        '2912': '統一超',
+        '9910': '豐泰',
+        '2887': '台新金',
+        '2890': '永豐金',
+        
+        # 熱門上櫃股票
+        '3078': '波若威',
+        '6547': '高端疫苗',
+        '3105': '穩懋',
+        '5274': '信驊',
+        '3661': '世芯-KY',
+        '6488': '環球晶',
+        '8299': '群聯',
+        '3293': '鈊象',
+        '5483': '中美晶',
+        '3260': '威剛',
+        '6121': '新普',
+        '6147': '頎邦',
+        '8086': '宏捷科',
+        '4966': '譜瑞-KY',
+        '3227': '原相',
+        '3707': '漢磊',
+        '5269': '祥碩',
+        '3529': '力旺',
+        '6104': '創惟',
+        '3680': '家登',
+        '5347': '世界',
+        '3324': '雙鴻',
+        '6510': '精測',
+        '3141': '晶宏',
+        '6732': 'M31',
+        '3217': '優群',
+        '4743': '合一',
+        '4174': '浩鼎',
+        '1565': '精華',
+        '4123': '晟德',
+        '6469': '大樹'
+    }
+
+def init_stock_list():
+    """初始化股票清單"""
+    global STOCK_CODES, STOCK_NAMES
+    # 先使用基本清單，確保程式可以運作
+    STOCK_CODES = get_fallback_stock_list()
+    STOCK_NAMES = {v: k for k, v in STOCK_CODES.items()}
+    print(f"初始化基本股票清單: {len(STOCK_CODES)} 支")
+    # 背景嘗試載入完整清單
+    try:
+        fetch_stock_list()
+    except Exception as e:
+        print(f"背景載入股票清單失敗: {e}")
+
+def fetch_stock_list():
+    """動態爬取所有上市櫃股票清單"""
+    global STOCK_CODES, STOCK_NAMES, STOCK_CACHE_TIME
+    
+    # 檢查快取是否有效
+    if STOCK_CACHE_TIME and STOCK_CODES:
+        if time.time() - STOCK_CACHE_TIME < CACHE_DURATION:
+            print(f"使用快取的股票清單，共 {len(STOCK_CODES)} 支股票")
+            return True
+    
+    print("開始動態爬取股票清單...")
+    temp_codes = {}
+    
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        # 方法1: 使用更可靠的 API endpoint
+        try:
+            # 取得所有上市股票
+            print("爬取上市股票...")
+            tse_url = "https://www.twse.com.tw/rwd/zh/api/codeQuery?query="
+            response = requests.get(tse_url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if 'suggestions' in data:
+                    for item in data['suggestions']:
+                        # 格式: "2330\t台積電"
+                        if '\t' in item:
+                            parts = item.split('\t')
+                            if len(parts) >= 2:
+                                code = parts[0].strip()
+                                name = parts[1].strip().split('(')[0].strip()  # 移除括號內容
+                                if code and name and code[0].isdigit():
+                                    temp_codes[code] = name
+            
+            # 取得所有上櫃股票
+            print("爬取上櫃股票...")
+            otc_url = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&se=AL"
+            response = requests.get(otc_url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if 'aaData' in data:
+                    for item in data['aaData']:
+                        if len(item) >= 2:
+                            code = str(item[0]).strip()
+                            name = str(item[1]).strip()
+                            if code and name and code[0].isdigit():
+                                temp_codes[code] = name
+                                
+        except Exception as e:
+            print(f"方法1失敗: {e}")
+        
+        # 方法2: 備用爬取方式
+        if len(temp_codes) < 100:
+            print("使用備用爬取方式...")
+            try:
+                # 從證交所網站取得股票清單
+                import re
+                
+                # 上市股票
+                url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+                response = requests.get(url, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    response.encoding = 'big5'
+                    html = response.text
+                    # 簡單的正則表達式解析
+                    pattern = r'<td.*?>(\d{4,6})\s+([\u4e00-\u9fa5\w\-]+)</td>'
+                    matches = re.findall(pattern, html)
+                    for code, name in matches:
+                        if code and name and code[0].isdigit():
+                            temp_codes[code] = name.strip()
+                
+                # 上櫃股票
+                url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
+                response = requests.get(url, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    response.encoding = 'big5'
+                    html = response.text
+                    pattern = r'<td.*?>(\d{4,6})\s+([\u4e00-\u9fa5\w\-]+)</td>'
+                    matches = re.findall(pattern, html)
+                    for code, name in matches:
+                        if code and name and code[0].isdigit():
+                            temp_codes[code] = name.strip()
+                            
+            except Exception as e:
+                print(f"方法2失敗: {e}")
+        
+        # 如果爬取失敗或數量太少，使用備用清單
+        if len(temp_codes) < 50:
+            print("爬取數量不足，使用備用清單...")
+            temp_codes = get_fallback_stock_list()
+        
+        # 更新全域變數
+        if temp_codes:
+            STOCK_CODES = temp_codes
+            STOCK_NAMES = {v: k for k, v in STOCK_CODES.items()}
+            STOCK_CACHE_TIME = time.time()
+            print(f"✅ 成功載入 {len(STOCK_CODES)} 支股票")
+            
+            # 儲存到 Google Sheets 作為備份（選擇性）
+            try:
+                save_stock_list_to_sheets(STOCK_CODES)
+            except:
+                pass
+                
+            return True
+        else:
+            print("❌ 無法取得股票清單，使用基本清單")
+            STOCK_CODES = get_fallback_stock_list()
+            STOCK_NAMES = {v: k for k, v in STOCK_CODES.items()}
+            return False
+            
+    except Exception as e:
+        print(f"爬取股票清單錯誤: {e}")
+        import traceback
+        print(traceback.format_exc())
+        # 發生錯誤時使用備用清單
+        STOCK_CODES = get_fallback_stock_list()
+        STOCK_NAMES = {v: k for k, v in STOCK_CODES.items()}
+        return False
+
+def save_stock_list_to_sheets(stock_dict):
+    """將股票清單儲存到 Google Sheets（選擇性功能）"""
+    try:
+        if not GOOGLE_CREDENTIALS_JSON or not SPREADSHEET_ID:
+            return
+        
+        import gspread
+        credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
+        gc = gspread.service_account_from_dict(credentials_info)
+        spreadsheet = gc.open_by_key(SPREADSHEET_ID)
+        
+        # 嘗試取得或創建股票清單工作表
+        try:
+            stock_list_sheet = spreadsheet.worksheet('股票清單')
+            stock_list_sheet.clear()
+        except:
+            stock_list_sheet = spreadsheet.add_worksheet(title='股票清單', rows=5000, cols=3)
+        
+        # 準備資料
+        headers = [['股票代號', '股票名稱', '更新時間']]
+        data = []
+        update_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        for code, name in sorted(stock_dict.items()):
+            data.append([code, name, update_time])
+        
+        # 寫入資料
+        if data:
+            stock_list_sheet.update('A1:C1', headers)
+            stock_list_sheet.update(f'A2:C{len(data)+1}', data)
+            print(f"✅ 股票清單已儲存到 Google Sheets")
+            
+    except Exception as e:
+        print(f"儲存股票清單到 Sheets 失敗: {e}")
+
+def search_stock_from_web(keyword):
+    """從網路即時搜尋股票代號和名稱"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        # 使用證交所的搜尋 API
+        search_url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+        
+        # 嘗試不同的搜尋策略
+        possible_codes = []
+        
+        # 如果是數字，可能是股票代號
+        if keyword.isdigit():
+            possible_codes.append(keyword)
+        
+        # 搜尋上市股票
+        for code in possible_codes:
+            params = {'ex_ch': f'tse_{code}.tw', 'json': '1', 'delay': '0'}
+            response = requests.get(search_url, params=params, headers=headers, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                if 'msgArray' in data and len(data['msgArray']) > 0:
+                    stock_data = data['msgArray'][0]
+                    if 'c' in stock_data and 'n' in stock_data:
+                        return stock_data['c'], stock_data['n']
+        
+        # 搜尋上櫃股票
+        for code in possible_codes:
+            params = {'ex_ch': f'otc_{code}.tw', 'json': '1', 'delay': '0'}
+            response = requests.get(search_url, params=params, headers=headers, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                if 'msgArray' in data and len(data['msgArray']) > 0:
+                    stock_data = data['msgArray'][0]
+                    if 'c' in stock_data and 'n' in stock_data:
+                        return stock_data['c'], stock_data['n']
+        
+        return None, keyword
+        
+    except Exception as e:
+        print(f"搜尋股票錯誤: {e}")
+        return None, keyword
+
 # 初始化 Google Sheets
 init_google_sheets()
 
-886': '兆豐金',
-    '2891': '中信金',
-    '1301': '台塑',
-    '1303': '南亞',
-    '6505': '台塑化',
-    '2002': '中鋼',
-    '2207': '和泰車',
-    '2357': '華碩',
-    '2382': '廣達',
-    '2395': '研華',
-    '3711': '日月光投控',
-    '2379': '瑞昱',
-    '2303': '聯電',
-    '2884': '玉山金',
-    '2885': '元大金',
-    '2892': '第一金',
-    '2887': '台新金',
-    '2890': '永豐金',
-    '2308': '台達電',
-    '2327': '國巨',
-    '2345': '智邦',
-    '2377': '微星',
-    '3008': '大立光',
-    '1216': '統一',
-    '1229': '聯華',
-    '2912': '統一超',
-    '9910': '豐泰',
-    '2603': '長榮',
-    '2609': '陽明',
-    '2615': '萬海'
-}
-
-# 反向查詢：股票名稱 → 代號
-STOCK_NAMES = {v: k for k, v in STOCK_CODES.items()}
+# 初始化股票清單
+init_stock_list()
 
 def get_stock_code(input_text):
     """取得股票代號，支援代號或名稱輸入（動態查詢）"""
@@ -138,7 +381,7 @@ def get_stock_code(input_text):
     
     # 確保股票清單已載入
     if not STOCK_CODES:
-        fetch_stock_list()
+        init_stock_list()
     
     # 先嘗試直接匹配代號
     if input_text in STOCK_CODES:
@@ -1709,17 +1952,18 @@ def send_reply_message(reply_token, message_text):
 def health_check():
     return jsonify({
         "status": "running",
-        "message": "🤖 完整版股票管理 LINE Bot v3.4",
-        "version": "3.4",
+        "message": "🤖 完整版股票管理 LINE Bot v3.5",
+        "version": "3.5",
         "timestamp": datetime.now().isoformat(),
         "features": [
             "買入股票（支援批次）",
             "賣出投票（支援批次）",
             "持股查詢（支援查看他人）",
             "投票系統",
-            "即時股價",
+            "即時股價（動態爬取）",
             "零股支援",
-            "查看他人持股功能 - NEW!"
+            "查看他人持股功能",
+            "動態股票清單"
         ],
         "sheets_connected": bool(transaction_sheet and holdings_sheet),
         "environment_vars": {
@@ -1811,8 +2055,8 @@ def webhook():
                     parts = message_text.split()
                     if len(parts) == 1:
                         response_text = get_user_holdings(user_id, group_id)
-                    elif len(parts) == 2:
-                        query = parts[1]
+                    elif len(parts) >= 2:
+                        query = ' '.join(parts[1:])  # 支援多字名稱
                         response_text = get_user_holdings(user_id, group_id, query)
                     else:
                         response_text = """❌ 持股查詢格式錯誤
@@ -1888,9 +2132,19 @@ def webhook():
 
                 # 股票清單
                 elif message_text == '/股票清單':
-                    stock_list = "📋 支援的股票清單：\n\n"
-                    for code, name in sorted(STOCK_CODES.items()):
+                    if not STOCK_CODES:
+                        init_stock_list()
+                    
+                    stock_list = f"📋 支援的股票清單（共 {len(STOCK_CODES)} 支）：\n\n"
+                    count = 0
+                    for code, name in sorted(STOCK_CODES.items())[:50]:  # 只顯示前50支
                         stock_list += f"• {code} - {name}\n"
+                        count += 1
+                    
+                    if len(STOCK_CODES) > 50:
+                        stock_list += f"\n... 還有 {len(STOCK_CODES) - 50} 支股票\n"
+                        stock_list += "\n💡 系統支援所有上市櫃股票，可直接輸入代號或名稱查詢"
+                    
                     response_text = stock_list
 
                 # 幫助
@@ -1925,7 +2179,9 @@ def webhook():
 
 🆕 查看他人持股範例：
 • /持股 王小明 - 查看王小明的持股
-• /持股 全部 - 查看群組所有人的持股總覽"""
+• /持股 全部 - 查看群組所有人的持股總覽
+
+📌 系統支援所有上市櫃股票（動態更新）"""
 
                 # 測試
                 elif message_text == '/測試':
@@ -1933,6 +2189,7 @@ def webhook():
                     test_results += f"✅ Webhook 連接成功\n"
                     test_results += f"✅ Google Sheets: {'已連接' if holdings_sheet else '未連接'}\n"
                     test_results += f"✅ LINE Token: {'已設置' if LINE_CHANNEL_ACCESS_TOKEN else '未設置'}\n"
+                    test_results += f"✅ 股票清單: {len(STOCK_CODES)} 支股票\n"
                     test_results += f"\n📊 股價測試（台積電 2330）：\n"
                     
                     test_price = get_stock_price('2330', '台積電')
@@ -1943,7 +2200,7 @@ def webhook():
                     
                     test_results += f"\n🌐 運行環境：Vercel\n"
                     test_results += f"⏰ 系統時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    test_results += f"📦 版本：3.4 (支援查看他人持股)"
+                    test_results += f"📦 版本：3.5 (動態股票清單)"
                     
                     response_text = test_results
 
