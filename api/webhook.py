@@ -455,141 +455,283 @@ def parse_sell_command(text):
         return None
 
 def handle_buy_stock(user_id, user_name, group_id, buy_data):
-    """處理買入股票（單筆或批次）"""
+    """處理買入股票（修復版 - 加強錯誤處理）"""
     try:
+        # 基本資料驗證
+        if not buy_data:
+            return "❌ 買入資料為空"
+        
+        # 取得基本資料
+        shares = buy_data.get('shares', 0)
+        price = buy_data.get('price', 0)
+        stock_code = buy_data.get('stock_code', '')
+        stock_name = buy_data.get('stock_name', '未知股票')
+        reason = buy_data.get('reason', '無理由')
+        is_batch = buy_data.get('is_batch', False)
+        transactions = buy_data.get('transactions', [])
+        
+        # 如果是批次交易
+        if is_batch and len(transactions) > 1:
+            return handle_batch_buy_stock(user_id, user_name, group_id, buy_data)
+        
+        # 驗證數值
+        if shares <= 0:
+            return "❌ 股數必須大於0"
+        if price <= 0:
+            return "❌ 價格必須大於0"
+        
+        total_amount = shares * price
+        record_id = str(int(datetime.now().timestamp()))
         current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        # 檢查是否為批次交易
-        if buy_data.get('is_batch') and len(buy_data.get('transactions', [])) > 1:
-            # 批次交易
-            transaction_details = []
-            for i, trans in enumerate(buy_data['transactions'], 1):
-                record_id = f"{int(datetime.now().timestamp())}_{i}"
-                
-                if transaction_sheet:
-                    row_data = [
-                        current_time, user_id, user_name, buy_data['stock_code'], buy_data['stock_name'],
-                        '買入', trans['shares'], trans['price'], trans['amount'], 
-                        f"{buy_data['reason']} (批次{i}/{len(buy_data['transactions'])})",
-                        group_id, record_id, '', '已執行', f"批次交易第{i}筆"
-                    ]
-                    transaction_sheet.append_row(row_data)
-                
-                transaction_details.append(
-                    f"  • {format_shares(trans['shares'])} @ {trans['price']:.2f}元 = {trans['amount']:,.0f}元"
-                )
-            
-            # 使用平均價格更新持股
-            update_holdings(user_id, user_name, group_id, buy_data['stock_code'],
-                          buy_data['stock_name'], buy_data['total_shares'],
-                          buy_data['avg_price'], 'buy')
-            
-            response = f"""📈 批次買入交易已記錄！
-
-🏢 股票：{buy_data['stock_name']} ({buy_data['stock_code'] if buy_data['stock_code'] else '手動輸入'})
-
-📊 交易明細：
-{chr(10).join(transaction_details)}
-
-💰 總計：
-  • 總股數：{format_shares(buy_data['total_shares'])}
-  • 總金額：{buy_data['total_amount']:,.0f}元
-  • 平均價：{buy_data['avg_price']:.2f}元
-
-💡 理由：{buy_data['reason']}
-
-✅ 所有交易已記錄至 Google Sheets"""
-            
-        else:
-            # 單筆交易
-            total_amount = buy_data['shares'] * buy_data['price']
-            record_id = str(int(datetime.now().timestamp()))
-            
-            if transaction_sheet:
+        # 嘗試記錄到 Google Sheets
+        sheets_success = False
+        if transaction_sheet:
+            try:
                 row_data = [
-                    current_time, user_id, user_name, buy_data['stock_code'], buy_data['stock_name'],
-                    '買入', buy_data['shares'], buy_data['price'], total_amount, buy_data['reason'],
-                    group_id, record_id, '', '已執行', ''
+                    current_time,
+                    str(user_id),
+                    str(user_name),
+                    str(stock_code),
+                    str(stock_name),
+                    '買入',
+                    int(shares),
+                    float(price),
+                    float(total_amount),
+                    str(reason),
+                    str(group_id),
+                    str(record_id),
+                    '',
+                    '已執行',
+                    ''
                 ]
                 transaction_sheet.append_row(row_data)
-            
-            update_holdings(user_id, user_name, group_id, buy_data['stock_code'],
-                          buy_data['stock_name'], buy_data['shares'], buy_data['price'], 'buy')
-            
-            response = f"""📈 買入交易已記錄！
+                sheets_success = True
+                print(f"✅ 交易已記錄到 Google Sheets")
+            except Exception as e:
+                print(f"⚠️ Google Sheets 記錄失敗: {e}")
+                sheets_success = False
+        
+        # 嘗試更新持股
+        holdings_updated = False
+        try:
+            update_holdings(user_id, user_name, group_id, stock_code, 
+                          stock_name, shares, price, 'buy')
+            holdings_updated = True
+            print(f"✅ 持股已更新")
+        except Exception as e:
+            print(f"⚠️ 持股更新失敗: {e}")
+            holdings_updated = False
+        
+        # 產生回應訊息
+        display_shares = format_shares(shares)
+        response = f"""📈 買入交易已處理！
 
-🏢 股票：{buy_data['stock_name']} ({buy_data['stock_code'] if buy_data['stock_code'] else '手動輸入'})
-📊 數量：{format_shares(buy_data['shares'])}
-💰 單價：{buy_data['price']}元
-💵 總金額：{total_amount:,}元
-💡 理由：{buy_data['reason']}
-
-✅ 交易紀錄已儲存至 Google Sheets"""
+🏢 股票：{stock_name} ({stock_code if stock_code else '手動輸入'})
+📊 數量：{display_shares}
+💰 單價：{price:.2f}元
+💵 總金額：{total_amount:,.0f}元
+💡 理由：{reason}"""
+        
+        # 加上狀態提示
+        if sheets_success and holdings_updated:
+            response += "\n\n✅ 交易已完整記錄"
+        elif sheets_success:
+            response += "\n\n✅ 交易已記錄（持股更新失敗）"
+        elif holdings_updated:
+            response += "\n\n⚠️ 已更新持股（交易記錄失敗）"
+        else:
+            response += "\n\n⚠️ 交易已接收但記錄失敗，請檢查 Google Sheets 連接"
         
         return response
         
     except Exception as e:
         print(f"❌ 處理買入錯誤: {e}")
-        return f"❌ 處理買入指令時發生錯誤: {str(e)}"
+        import traceback
+        print(traceback.format_exc())
+        
+        # 提供更友善的錯誤訊息
+        return f"""❌ 處理買入時發生錯誤
+
+請檢查：
+1. Google Sheets 是否正確連接
+2. 環境變數是否設置完整
+3. 股票資訊是否正確
+
+您可以使用 /測試 檢查系統狀態
+錯誤代碼：{str(e)[:100]}"""
+
+def handle_batch_buy_stock(user_id, user_name, group_id, buy_data):
+    """處理批次買入（不同價格）"""
+    try:
+        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        transaction_details = []
+        
+        # 記錄每筆交易
+        for i, trans in enumerate(buy_data['transactions'], 1):
+            record_id = f"{int(datetime.now().timestamp())}_{i}"
+            
+            if transaction_sheet:
+                try:
+                    row_data = [
+                        current_time,
+                        str(user_id),
+                        str(user_name),
+                        str(buy_data.get('stock_code', '')),
+                        str(buy_data.get('stock_name', '未知股票')),
+                        '買入',
+                        int(trans.get('shares', 0)),
+                        float(trans.get('price', 0)),
+                        float(trans.get('amount', 0)),
+                        f"{buy_data.get('reason', '批次買入')} (批次{i}/{len(buy_data['transactions'])})",
+                        str(group_id),
+                        str(record_id),
+                        '',
+                        '已執行',
+                        f"批次交易第{i}筆"
+                    ]
+                    transaction_sheet.append_row(row_data)
+                except Exception as e:
+                    print(f"批次 {i} 記錄失敗: {e}")
+            
+            transaction_details.append(
+                f"  • {format_shares(trans['shares'])} @ {trans['price']:.2f}元 = {trans['amount']:,.0f}元"
+            )
+        
+        # 使用平均價格更新持股
+        try:
+            update_holdings(
+                user_id, user_name, group_id,
+                buy_data.get('stock_code', ''),
+                buy_data.get('stock_name', '未知股票'),
+                buy_data.get('total_shares', 0),
+                buy_data.get('avg_price', 0),
+                'buy'
+            )
+        except Exception as e:
+            print(f"批次買入更新持股失敗: {e}")
+        
+        response = f"""📈 批次買入交易已記錄！
+
+🏢 股票：{buy_data.get('stock_name', '未知')} ({buy_data.get('stock_code', 'N/A')})
+
+📊 交易明細：
+{chr(10).join(transaction_details)}
+
+💰 總計：
+  • 總股數：{format_shares(buy_data.get('total_shares', 0))}
+  • 總金額：{buy_data.get('total_amount', 0):,.0f}元
+  • 平均價：{buy_data.get('avg_price', 0):.2f}元
+
+💡 理由：{buy_data.get('reason', '批次買入')}
+
+✅ 所有交易已記錄"""
+        
+        return response
+        
+    except Exception as e:
+        print(f"❌ 處理批次買入錯誤: {e}")
+        return f"❌ 處理批次買入時發生錯誤: {str(e)}"
 
 def update_holdings(user_id, user_name, group_id, stock_code, stock_name, shares, price, action):
-    """更新持股統計"""
+    """更新持股統計（修復版）"""
     try:
         if not holdings_sheet:
-            return
+            print("⚠️ holdings_sheet 不存在")
+            return False
         
-        records = holdings_sheet.get_all_records()
+        # 安全地取得記錄
+        try:
+            records = holdings_sheet.get_all_records()
+        except:
+            records = []
+        
         existing_row = None
         row_index = None
         
+        # 查找現有持股
         for i, record in enumerate(records, 2):
-            if (record['使用者ID'] == user_id and 
-                record['群組ID'] == group_id and
-                (record['股票代號'] == stock_code or record['股票名稱'] == stock_name)):
-                existing_row = record
-                row_index = i
-                break
+            try:
+                # 確保都是字串比較
+                if (str(record.get('使用者ID', '')) == str(user_id) and 
+                    str(record.get('群組ID', '')) == str(group_id)):
+                    
+                    # 比對股票
+                    if (str(record.get('股票代號', '')) == str(stock_code) and stock_code) or \
+                       (str(record.get('股票名稱', '')) == str(stock_name)):
+                        existing_row = record
+                        row_index = i
+                        break
+            except:
+                continue
         
         current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
         if action == 'buy':
-            if existing_row:
-                old_shares = int(existing_row['總股數'] or 0)
-                old_cost = float(existing_row['總成本'] or 0)
+            try:
+                if existing_row:
+                    # 更新現有持股
+                    old_shares = float(str(existing_row.get('總股數', 0) or 0).replace(',', ''))
+                    old_cost = float(str(existing_row.get('總成本', 0) or 0).replace(',', ''))
+                    
+                    new_shares = old_shares + shares
+                    new_total_cost = old_cost + (shares * price)
+                    new_avg_cost = new_total_cost / new_shares if new_shares > 0 else 0
+                    
+                    holdings_sheet.update(f'E{row_index}:G{row_index}', 
+                                        [[int(new_shares), round(new_avg_cost, 2), round(new_total_cost, 2)]])
+                    holdings_sheet.update(f'I{row_index}', [[current_time]])
+                else:
+                    # 新增持股記錄
+                    new_row = [
+                        str(user_id),
+                        str(user_name),
+                        str(stock_code),
+                        str(stock_name),
+                        int(shares),
+                        float(price),
+                        float(shares * price),
+                        str(group_id),
+                        current_time,
+                        ''
+                    ]
+                    holdings_sheet.append_row(new_row)
                 
-                new_shares = old_shares + shares
-                new_total_cost = old_cost + (shares * price)
-                new_avg_cost = new_total_cost / new_shares if new_shares > 0 else 0
+                return True
                 
-                holdings_sheet.update(f'E{row_index}:G{row_index}', 
-                                    [[new_shares, round(new_avg_cost, 2), new_total_cost]])
-                holdings_sheet.update(f'I{row_index}', current_time)
-            else:
-                new_row = [
-                    user_id, user_name, stock_code, stock_name,
-                    shares, price, shares * price, group_id, current_time, ''
-                ]
-                holdings_sheet.append_row(new_row)
+            except Exception as e:
+                print(f"更新持股錯誤: {e}")
+                return False
         
         elif action == 'sell':
             if existing_row and row_index:
-                old_shares = int(existing_row['總股數'] or 0)
-                old_cost = float(existing_row['總成本'] or 0)
-                avg_cost = float(existing_row['平均成本'] or 0)
-                
-                if old_shares >= shares:
-                    new_shares = old_shares - shares
-                    new_total_cost = new_shares * avg_cost if new_shares > 0 else 0
+                try:
+                    old_shares = float(str(existing_row.get('總股數', 0) or 0).replace(',', ''))
+                    avg_cost = float(str(existing_row.get('平均成本', 0) or 0).replace(',', ''))
                     
-                    if new_shares > 0:
-                        holdings_sheet.update(f'E{row_index}:G{row_index}', 
-                                            [[new_shares, avg_cost, new_total_cost]])
-                        holdings_sheet.update(f'I{row_index}', current_time)
-                    else:
-                        holdings_sheet.delete_rows(row_index)
+                    if old_shares >= shares:
+                        new_shares = old_shares - shares
+                        new_total_cost = new_shares * avg_cost if new_shares > 0 else 0
+                        
+                        if new_shares > 0:
+                            holdings_sheet.update(f'E{row_index}:G{row_index}', 
+                                                [[int(new_shares), round(avg_cost, 2), round(new_total_cost, 2)]])
+                            holdings_sheet.update(f'I{row_index}', [[current_time]])
+                        else:
+                            holdings_sheet.delete_rows(row_index)
+                        
+                        return True
+                except Exception as e:
+                    print(f"賣出更新錯誤: {e}")
+                    return False
+        
+        return False
         
     except Exception as e:
         print(f"❌ 更新持股統計錯誤: {e}")
+        import traceback
+        print(traceback.format_exc())
+        return False
 
 def get_user_holdings(user_id, group_id, specific_stock=None):
     """查詢使用者持股"""
@@ -1067,8 +1209,8 @@ def send_reply_message(reply_token, message_text):
 def health_check():
     return jsonify({
         "status": "running",
-        "message": "🤖 完整版股票管理 LINE Bot v3.0",
-        "version": "3.0",
+        "message": "🤖 完整版股票管理 LINE Bot v3.1",
+        "version": "3.1",
         "timestamp": datetime.now().isoformat(),
         "features": [
             "買入股票（支援批次）",
@@ -1275,7 +1417,7 @@ def webhook():
                     
                     test_results += f"\n🌐 運行環境：Vercel\n"
                     test_results += f"⏰ 系統時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    test_results += f"📦 版本：3.0"
+                    test_results += f"📦 版本：3.1"
                     
                     response_text = test_results
 
