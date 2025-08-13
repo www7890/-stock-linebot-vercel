@@ -742,26 +742,37 @@ def update_holdings(user_id, user_name, group_id, stock_code, stock_name, shares
         # 安全地取得記錄
         try:
             records = holdings_sheet.get_all_records()
-        except:
+        except Exception as e:
+            print(f"無法讀取持股記錄: {e}")
             records = []
         
         existing_row = None
         row_index = None
         
-        # 查找現有持股
+        # 查找現有持股 - 更精確的比對
         for i, record in enumerate(records, 2):
             try:
-                # 確保都是字串比較
-                if (str(record.get('使用者ID', '')) == str(user_id) and 
-                    str(record.get('群組ID', '')) == str(group_id)):
-                    
-                    # 比對股票
-                    if (str(record.get('股票代號', '')) == str(stock_code) and stock_code) or \
-                       (str(record.get('股票名稱', '')) == str(stock_name)):
+                # 確保都轉為字串比較，避免型別問題
+                record_user_id = str(record.get('使用者ID', ''))
+                record_group_id = str(record.get('群組ID', ''))
+                record_stock_code = str(record.get('股票代號', ''))
+                record_stock_name = str(record.get('股票名稱', ''))
+                
+                # 比對使用者和群組
+                if record_user_id == str(user_id) and record_group_id == str(group_id):
+                    # 比對股票（代號優先，名稱次之）
+                    if stock_code and record_stock_code == str(stock_code):
                         existing_row = record
                         row_index = i
+                        print(f"找到持股記錄（by代號）：第 {row_index} 行")
                         break
-            except:
+                    elif record_stock_name == str(stock_name):
+                        existing_row = record
+                        row_index = i
+                        print(f"找到持股記錄（by名稱）：第 {row_index} 行")
+                        break
+            except Exception as e:
+                print(f"比對第 {i} 行時發生錯誤: {e}")
                 continue
         
         current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -780,6 +791,7 @@ def update_holdings(user_id, user_name, group_id, stock_code, stock_name, shares
                     holdings_sheet.update(f'E{row_index}:G{row_index}', 
                                         [[int(new_shares), round(new_avg_cost, 2), round(new_total_cost, 2)]])
                     holdings_sheet.update(f'I{row_index}', [[current_time]])
+                    print(f"✅ 買入更新成功：{old_shares} + {shares} = {new_shares} 股")
                 else:
                     # 新增持股記錄
                     new_row = [
@@ -795,34 +807,56 @@ def update_holdings(user_id, user_name, group_id, stock_code, stock_name, shares
                         ''
                     ]
                     holdings_sheet.append_row(new_row)
+                    print(f"✅ 新增持股記錄：{stock_name} {shares} 股")
                 
                 return True
                 
             except Exception as e:
-                print(f"更新持股錯誤: {e}")
+                print(f"更新買入持股錯誤: {e}")
+                import traceback
+                print(traceback.format_exc())
                 return False
         
         elif action == 'sell':
-            if existing_row and row_index:
-                try:
-                    old_shares = float(str(existing_row.get('總股數', 0) or 0).replace(',', ''))
-                    avg_cost = float(str(existing_row.get('平均成本', 0) or 0).replace(',', ''))
-                    
-                    if old_shares >= shares:
-                        new_shares = old_shares - shares
-                        new_total_cost = new_shares * avg_cost if new_shares > 0 else 0
-                        
-                        if new_shares > 0:
-                            holdings_sheet.update(f'E{row_index}:G{row_index}', 
-                                                [[int(new_shares), round(avg_cost, 2), round(new_total_cost, 2)]])
-                            holdings_sheet.update(f'I{row_index}', [[current_time]])
-                        else:
-                            holdings_sheet.delete_rows(row_index)
-                        
-                        return True
-                except Exception as e:
-                    print(f"賣出更新錯誤: {e}")
+            if not existing_row or not row_index:
+                print(f"❌ 找不到持股記錄來執行賣出: user={user_id}, stock={stock_code}/{stock_name}")
+                return False
+            
+            try:
+                # 取得現有股數和成本
+                old_shares = float(str(existing_row.get('總股數', 0) or 0).replace(',', ''))
+                avg_cost = float(str(existing_row.get('平均成本', 0) or 0).replace(',', ''))
+                
+                print(f"準備賣出：現有 {old_shares} 股，要賣 {shares} 股")
+                
+                if old_shares < shares:
+                    print(f"❌ 持股不足：只有 {old_shares} 股，無法賣出 {shares} 股")
                     return False
+                
+                new_shares = old_shares - shares
+                
+                if new_shares > 0:
+                    # 還有剩餘股數，更新記錄
+                    new_total_cost = new_shares * avg_cost
+                    print(f"更新持股：剩餘 {new_shares} 股")
+                    
+                    holdings_sheet.update(f'E{row_index}:G{row_index}', 
+                                        [[int(new_shares), round(avg_cost, 2), round(new_total_cost, 2)]])
+                    holdings_sheet.update(f'I{row_index}', [[current_time]])
+                    print(f"✅ 賣出更新成功：{old_shares} - {shares} = {new_shares} 股")
+                else:
+                    # 賣完了，刪除整筆記錄
+                    print(f"全部賣出，刪除第 {row_index} 行")
+                    holdings_sheet.delete_rows(row_index)
+                    print(f"✅ 持股記錄已刪除（全部賣出）")
+                
+                return True
+                
+            except Exception as e:
+                print(f"賣出更新錯誤: {e}")
+                import traceback
+                print(traceback.format_exc())
+                return False
         
         return False
         
@@ -1180,22 +1214,47 @@ def execute_sell(vote, vote_id):
         total_profit = (vote['price'] - vote['avg_cost']) * vote['shares']
         record_id = str(int(datetime.now().timestamp()))
         
+        # 記錄到交易紀錄
         if transaction_sheet:
-            row_data = [
-                current_time, vote['initiator_id'], vote['initiator_name'],
-                vote['stock_code'], vote['stock_name'], '賣出',
-                vote['shares'], vote['price'], total_amount,
-                f"投票通過 (贊成:{len(vote['yes_votes'])} 反對:{len(vote['no_votes'])})",
-                vote['group_id'], record_id, vote_id, '已執行',
-                f"實現損益: {total_profit:+,.0f}元"
-            ]
-            transaction_sheet.append_row(row_data)
+            try:
+                row_data = [
+                    current_time, 
+                    str(vote['initiator_id']), 
+                    str(vote['initiator_name']),
+                    str(vote['stock_code']), 
+                    str(vote['stock_name']), 
+                    '賣出',
+                    int(vote['shares']), 
+                    float(vote['price']), 
+                    float(total_amount),
+                    f"投票通過 (贊成:{len(vote['yes_votes'])} 反對:{len(vote['no_votes'])})",
+                    str(vote['group_id']), 
+                    str(record_id), 
+                    str(vote_id), 
+                    '已執行',
+                    f"實現損益: {total_profit:+,.0f}元"
+                ]
+                transaction_sheet.append_row(row_data)
+                print(f"✅ 賣出交易已記錄到交易紀錄表")
+            except Exception as e:
+                print(f"⚠️ 記錄賣出交易失敗: {e}")
         
-        update_holdings(
-            vote['initiator_id'], vote['initiator_name'], vote['group_id'],
-            vote['stock_code'], vote['stock_name'], vote['shares'],
-            vote['price'], 'sell'
+        # 更新持股 - 這裡是關鍵！
+        update_result = update_holdings(
+            vote['initiator_id'], 
+            vote['initiator_name'], 
+            vote['group_id'],
+            vote['stock_code'], 
+            vote['stock_name'], 
+            vote['shares'],
+            vote['price'], 
+            'sell'
         )
+        
+        if update_result:
+            print(f"✅ 持股已更新：賣出 {vote['stock_name']} {vote['shares']} 股")
+        else:
+            print(f"❌ 持股更新失敗")
         
         return f"""🎉 賣出交易已執行！
 
@@ -1204,10 +1263,13 @@ def execute_sell(vote, vote_id):
 💵 成交金額：{total_amount:,.0f}元
 📊 實現損益：{total_profit:+,.0f}元
 
-✅ 交易已記錄至 Google Sheets"""
+✅ 交易已記錄至 Google Sheets
+✅ 持股已更新"""
         
     except Exception as e:
         print(f"執行賣出錯誤: {e}")
+        import traceback
+        print(traceback.format_exc())
         return f"❌ 執行賣出時發生錯誤: {str(e)}"
 
 def get_vote_status(vote_id):
