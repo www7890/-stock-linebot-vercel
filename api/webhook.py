@@ -1,4 +1,26 @@
-from flask import Flask, request, jsonify
+def get_stock_code(input_text):
+    """取得股票代號，支援代號或名稱輸入（動態查詢）"""
+    input_text = input_text.strip()
+    
+    # 確保股票清單已載入
+    if not STOCK_CODES:
+        fetch_stock_list()
+    
+    # 先嘗試直接匹配代號
+    if input_text in STOCK_CODES:
+        return input_text, STOCK_CODES[input_text]
+    
+    # 再嘗試匹配名稱
+    if input_text in STOCK_NAMES:
+        return STOCK_NAMES[input_text], input_text
+    
+    # 嘗試部分匹配名稱
+    for name, code in STOCK_NAMES.items():
+        if input_text in name or name in input_text:
+            return code, name
+    
+    # 如果本地找不到，嘗試從網路搜尋
+    print(f"本地找不到 {input_text}，from flask import Flask, request, jsonify
 import os
 import json
 import re
@@ -75,15 +97,7 @@ def init_google_sheets():
 # 初始化 Google Sheets
 init_google_sheets()
 
-# 股票代號對應表
-STOCK_CODES = {
-    '2330': '台積電',
-    '2454': '聯發科', 
-    '2317': '鴻海',
-    '2412': '中華電',
-    '2882': '國泰金',
-    '2881': '富邦金',
-    '2886': '兆豐金',
+886': '兆豐金',
     '2891': '中信金',
     '1301': '台塑',
     '1303': '南亞',
@@ -119,8 +133,12 @@ STOCK_CODES = {
 STOCK_NAMES = {v: k for k, v in STOCK_CODES.items()}
 
 def get_stock_code(input_text):
-    """取得股票代號，支援代號或名稱輸入"""
+    """取得股票代號，支援代號或名稱輸入（動態查詢）"""
     input_text = input_text.strip()
+    
+    # 確保股票清單已載入
+    if not STOCK_CODES:
+        fetch_stock_list()
     
     # 先嘗試直接匹配代號
     if input_text in STOCK_CODES:
@@ -135,27 +153,43 @@ def get_stock_code(input_text):
         if input_text in name or name in input_text:
             return code, name
     
+    # 如果本地找不到，嘗試從網路搜尋
+    print(f"本地找不到 {input_text}，嘗試網路搜尋...")
+    code, name = search_stock_from_web(input_text)
+    
+    # 如果找到了，加入快取
+    if code and code != input_text:
+        STOCK_CODES[code] = name
+        STOCK_NAMES[name] = code
+        print(f"✅ 找到並快取: {code} {name}")
+        return code, name
+    
     # 如果都找不到，返回原始輸入作為名稱，代號為空
     return '', input_text
 
 def get_stock_price_yahoo(stock_code):
-    """使用 Yahoo Finance API 抓取股價"""
+    """使用 Yahoo Finance API 抓取股價（支援上市上櫃）"""
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{stock_code}.TW"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
+        # 上市股票用 .TW，上櫃股票用 .TWO
+        suffixes = ['.TW', '.TWO']
         
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
+        for suffix in suffixes:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{stock_code}{suffix}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
             
-            if 'chart' in data and data['chart']['result']:
-                result = data['chart']['result'][0]
-                if 'meta' in result and 'regularMarketPrice' in result['meta']:
-                    price = result['meta']['regularMarketPrice']
-                    return round(float(price), 2)
+            response = requests.get(url, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                if 'chart' in data and data['chart']['result']:
+                    result = data['chart']['result'][0]
+                    if 'meta' in result and 'regularMarketPrice' in result['meta']:
+                        price = result['meta']['regularMarketPrice']
+                        print(f"✅ Yahoo Finance 成功 ({stock_code}{suffix}): {price}")
+                        return round(float(price), 2)
         
         return None
     except Exception as e:
@@ -163,8 +197,9 @@ def get_stock_price_yahoo(stock_code):
         return None
 
 def get_stock_price_twse(stock_code):
-    """使用 TWSE API 抓取股價（備用方案）"""
+    """使用 TWSE/TPEx API 抓取股價（支援上市上櫃）"""
     try:
+        # 先嘗試上市（TWSE）
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
         params = {
             'ex_ch': f'tse_{stock_code}.tw',
@@ -184,13 +219,30 @@ def get_stock_price_twse(stock_code):
             if 'msgArray' in data and len(data['msgArray']) > 0:
                 stock_data = data['msgArray'][0]
                 if 'z' in stock_data and stock_data['z'] != '-':
+                    print(f"✅ TWSE API 成功 (上市): {stock_data['z']}")
                     return float(stock_data['z'])
                 elif 'y' in stock_data and stock_data['y'] != '-':
+                    print(f"✅ TWSE API 成功 (上市昨收): {stock_data['y']}")
+                    return float(stock_data['y'])
+        
+        # 再嘗試上櫃（TPEx）
+        params['ex_ch'] = f'otc_{stock_code}.tw'
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if 'msgArray' in data and len(data['msgArray']) > 0:
+                stock_data = data['msgArray'][0]
+                if 'z' in stock_data and stock_data['z'] != '-':
+                    print(f"✅ TPEx API 成功 (上櫃): {stock_data['z']}")
+                    return float(stock_data['z'])
+                elif 'y' in stock_data and stock_data['y'] != '-':
+                    print(f"✅ TPEx API 成功 (上櫃昨收): {stock_data['y']}")
                     return float(stock_data['y'])
         
         return None
     except Exception as e:
-        print(f"TWSE API 錯誤 {stock_code}: {e}")
+        print(f"TWSE/TPEx API 錯誤 {stock_code}: {e}")
         return None
 
 def get_stock_price(stock_code, stock_name):
