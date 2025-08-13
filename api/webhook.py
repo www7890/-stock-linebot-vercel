@@ -867,17 +867,32 @@ def update_holdings(user_id, user_name, group_id, stock_code, stock_name, shares
         return False
 
 def get_user_holdings(user_id, group_id, specific_stock=None):
-    """查詢使用者持股"""
+    """查詢使用者持股（支援查看他人）"""
     try:
         if not holdings_sheet:
             return "❌ 無法連接持股資料庫"
         
         records = holdings_sheet.get_all_records()
-        user_holdings = []
         
+        # 判斷是否要查看他人持股
+        target_name = None
+        if specific_stock:
+            # 處理特殊關鍵字
+            if specific_stock == '全部':
+                return get_all_group_holdings(group_id)
+            
+            # 檢查是否為用戶名稱（不是股票）
+            stock_code, stock_name = get_stock_code(specific_stock)
+            if not stock_code and specific_stock not in STOCK_CODES.values():
+                # 可能是用戶名稱
+                target_name = specific_stock
+                return get_others_holdings(target_name, group_id)
+        
+        # 原本的個人持股查詢邏輯
+        user_holdings = []
         for record in records:
             if record['使用者ID'] == user_id and record['群組ID'] == group_id:
-                if specific_stock:
+                if specific_stock and not target_name:
                     stock_code, stock_name = get_stock_code(specific_stock)
                     if (record['股票代號'] == stock_code or 
                         record['股票名稱'] == stock_name or
@@ -887,7 +902,7 @@ def get_user_holdings(user_id, group_id, specific_stock=None):
                     user_holdings.append(record)
         
         if not user_holdings:
-            if specific_stock:
+            if specific_stock and not target_name:
                 return f"📊 您沒有持有 {specific_stock}"
             else:
                 return "📊 您目前沒有任何持股"
@@ -975,134 +990,117 @@ def get_user_holdings(user_id, group_id, specific_stock=None):
         print(f"❌ 查詢持股錯誤: {e}")
         return f"❌ 查詢持股時發生錯誤: {str(e)}"
 
-def create_sell_voting(user_id, user_name, group_id, sell_data):
-    """創建賣出投票"""
+def get_others_holdings(target_name, group_id):
+    """查看指定用戶的持股"""
     try:
         if not holdings_sheet:
             return "❌ 無法連接持股資料庫"
         
         records = holdings_sheet.get_all_records()
-        user_holding = None
+        target_holdings = []
+        target_user_id = None
         
+        # 找出目標用戶的持股
         for record in records:
-            if (record['使用者ID'] == user_id and 
-                record['群組ID'] == group_id and
-                (record['股票代號'] == sell_data['stock_code'] or 
-                 record['股票名稱'] == sell_data['stock_name'])):
-                user_holding = record
-                break
+            if record['群組ID'] == group_id and record['使用者名稱'] == target_name:
+                target_holdings.append(record)
+                if not target_user_id:
+                    target_user_id = record['使用者ID']
         
-        if not user_holding:
-            return f"❌ 您沒有持有 {sell_data['stock_name']}"
+        if not target_holdings:
+            return f"❌ 找不到用戶「{target_name}」的持股資料\n\n💡 提示：請確認名稱是否正確，或該用戶是否有持股"
         
-        current_shares = int(user_holding['總股數'])
-        sell_shares = sell_data.get('total_shares', sell_data.get('shares', 0))
+        # 計算持股資訊
+        total_cost = 0
+        total_current_value = 0
+        holdings_text = f"📊 {target_name} 的持股狀況：\n\n"
         
-        if current_shares < sell_shares:
-            return f"❌ 持股不足！\n您只有 {format_shares(current_shares)}，無法賣出 {format_shares(sell_shares)}"
+        for holding in target_holdings:
+            stock_code = holding['股票代號']
+            stock_name = holding['股票名稱']
+            shares = int(holding['總股數'])
+            avg_cost = float(holding['平均成本'])
+            cost = float(holding['總成本'])
+            
+            current_price = get_stock_price(stock_code, stock_name)
+            
+            if current_price > 0:
+                current_value = shares * current_price
+                unrealized_pnl = current_value - cost
+                pnl_percentage = (unrealized_pnl / cost * 100) if cost > 0 else 0
+                
+                price_trend = ""
+                if current_price > avg_cost:
+                    price_trend = "📈"
+                elif current_price < avg_cost:
+                    price_trend = "📉"
+                else:
+                    price_trend = "➡️"
+            else:
+                current_value = cost
+                unrealized_pnl = 0
+                pnl_percentage = 0
+                price_trend = ""
+            
+            holdings_text += f"{'='*25}\n"
+            holdings_text += f"📌 {stock_name}"
+            if stock_code:
+                holdings_text += f" ({stock_code})"
+            holdings_text += f"\n"
+            holdings_text += f"• 持股：{format_shares(shares)}\n"
+            holdings_text += f"• 平均成本：{avg_cost:.2f}元\n"
+            
+            if current_price > 0:
+                holdings_text += f"• 目前股價：{current_price:.2f}元 {price_trend}\n"
+                holdings_text += f"• 市值：{current_value:,.0f}元\n"
+                
+                if unrealized_pnl > 0:
+                    pnl_symbol = "🟢"
+                elif unrealized_pnl < 0:
+                    pnl_symbol = "🔴"
+                else:
+                    pnl_symbol = "⚪"
+                    
+                holdings_text += f"• 未實現損益：{pnl_symbol} {unrealized_pnl:+,.0f}元 ({pnl_percentage:+.2f}%)\n"
+            else:
+                holdings_text += f"• 股價：暫時無法取得\n"
+                holdings_text += f"• 成本價值：{cost:,.0f}元\n"
+            
+            total_cost += cost
+            total_current_value += current_value
         
-        # 取得群組成員數
-        group_member_count = get_group_member_count(group_id, user_id)
+        if len(target_holdings) > 1:
+            holdings_text += f"\n{'='*25}\n"
+            holdings_text += f"📊 {target_name} 的投資組合總結：\n"
+            holdings_text += f"• 總投資成本：{total_cost:,.0f}元\n"
+            
+            if total_current_value != total_cost:
+                holdings_text += f"• 目前總市值：{total_current_value:,.0f}元\n"
+                total_unrealized = total_current_value - total_cost
+                total_percentage = (total_unrealized / total_cost * 100) if total_cost > 0 else 0
+                
+                if total_unrealized > 0:
+                    total_symbol = "🟢"
+                elif total_unrealized < 0:
+                    total_symbol = "🔴"
+                else:
+                    total_symbol = "⚪"
+                    
+                holdings_text += f"• 總未實現損益：{total_symbol} {total_unrealized:+,.0f}元 ({total_percentage:+.2f}%)"
         
-        vote_id = str(uuid.uuid4())[:8]
-        current_time = datetime.now()
-        deadline = current_time + timedelta(hours=24)
+        # 加上最後更新時間
+        if target_holdings:
+            last_update = target_holdings[0].get('更新時間', '')
+            if last_update:
+                holdings_text += f"\n\n⏰ 最後更新：{last_update}"
         
-        # 處理批次或單一價格
-        if sell_data.get('is_batch') and len(sell_data.get('transactions', [])) > 1:
-            price_info = json.dumps([
-                {'shares': t['shares'], 'price': t['price']} 
-                for t in sell_data['transactions']
-            ])
-            display_price = sell_data.get('avg_price', sell_data.get('price', 0))
-        else:
-            price_info = str(sell_data.get('price', 0))
-            display_price = sell_data.get('price', sell_data.get('avg_price', 0))
-        
-        if voting_sheet:
-            try:
-                vote_data = [
-                    vote_id, user_id, user_name, sell_data['stock_code'], sell_data['stock_name'],
-                    sell_shares, display_price, group_id, '進行中', 0, 0,
-                    current_time.strftime('%Y-%m-%d %H:%M:%S'),
-                    deadline.strftime('%Y-%m-%d %H:%M:%S'),
-                    '', f"群組人數:{group_member_count}|價格詳情:{price_info}|{sell_data.get('note', '')}"
-                ]
-                voting_sheet.append_row(vote_data)
-            except Exception as e:
-                print(f"記錄投票到 Google Sheets 失敗: {e}")
-        
-        active_votes[vote_id] = {
-            'initiator_id': user_id,
-            'initiator_name': user_name,
-            'group_id': group_id,
-            'stock_code': sell_data['stock_code'],
-            'stock_name': sell_data['stock_name'],
-            'shares': sell_shares,
-            'price': display_price,
-            'price_details': sell_data.get('transactions', [{'shares': sell_shares, 'price': display_price}]),
-            'deadline': deadline,
-            'yes_votes': set(),
-            'no_votes': set(),
-            'voted_users': {},
-            'status': 'active',
-            'avg_cost': float(user_holding['平均成本']),
-            'note': sell_data.get('note', ''),
-            'group_member_count': group_member_count,
-            'required_votes': 1 if group_member_count == 1 else max(2, group_member_count // 2 + 1)  # 私訊時只需1票
-        }
-        
-        avg_cost = float(user_holding['平均成本'])
-        expected_profit = (display_price - avg_cost) * sell_shares
-        profit_percentage = ((display_price - avg_cost) / avg_cost * 100) if avg_cost > 0 else 0
-        
-        response = f"""📊 賣出投票已發起！
-
-🎯 投票ID：{vote_id}
-👤 發起人：{user_name}
-🏢 股票：{sell_data['stock_name']} ({sell_data['stock_code']})
-📉 賣出數量：{format_shares(sell_shares)}"""
-        
-        if sell_data.get('is_batch') and len(sell_data.get('transactions', [])) > 1:
-            response += f"\n💰 賣出價格（批次）："
-            for trans in sell_data['transactions']:
-                response += f"\n  • {format_shares(trans['shares'])} @ {trans['price']:.2f}元"
-            response += f"\n  • 平均價：{display_price:.2f}元"
-        else:
-            response += f"\n💰 賣出價格：{display_price:.2f}元"
-        
-        response += f"""
-📈 平均成本：{avg_cost:.2f}元
-💵 預期損益：{expected_profit:+,.0f}元 ({profit_percentage:+.2f}%)
-⏰ 投票截止：{deadline.strftime('%m/%d %H:%M')}
-
-👥 群組資訊："""
-        
-        # 根據情況顯示不同資訊
-        if group_member_count == 1:
-            response += f"\n• 私訊模式：您自己決定即可"
-            response += f"\n• 通過門檻：1票（您自己）"
-        else:
-            response += f"\n• 群組成員：{group_member_count}人（不含機器人）"
-            response += f"\n• 通過門檻：{active_votes[vote_id]['required_votes']}票（過半數）"
-        
-        response += f"""
-
-📝 投票方式：
-• 贊成請輸入：/贊成 {vote_id}
-• 反對請輸入：/反對 {vote_id}
-• 查看狀態：/投票狀態 {vote_id}"""
-        
-        if sell_data.get('note'):
-            response += f"\n\n💭 備註：{sell_data['note']}"
-        
-        return response
+        return holdings_text
         
     except Exception as e:
-        print(f"創建投票錯誤: {e}")
+        print(f"❌ 查詢他人持股錯誤: {e}")
         import traceback
         print(traceback.format_exc())
-        return f"❌ 創建投票時發生錯誤: {str(e)[:200]}"
+        return f"❌ 查詢他人持股時發生錯誤: {str(e)}"
 
 def get_group_member_count(group_id, user_id):
     """取得群組成員數量（排除機器人自己）"""
@@ -1384,233 +1382,266 @@ def send_reply_message(reply_token, message_text):
         print(f"❌ 發送失敗: {e}")
         return False
 
-@app.route("/", methods=['GET'])
-def health_check():
-    return jsonify({
-        "status": "running",
-        "message": "🤖 完整版股票管理 LINE Bot v3.3",
-        "version": "3.3",
-        "timestamp": datetime.now().isoformat(),
-        "features": [
-            "買入股票（支援批次）",
-            "賣出投票（支援批次）- 已修復",
-            "持股查詢",
-            "投票系統",
-            "即時股價",
-            "零股支援"
-        ],
-        "sheets_connected": bool(transaction_sheet and holdings_sheet),
-        "environment_vars": {
-            "LINE_CHANNEL_ACCESS_TOKEN": bool(LINE_CHANNEL_ACCESS_TOKEN),
-            "LINE_CHANNEL_SECRET": bool(LINE_CHANNEL_SECRET),
-            "SPREADSHEET_ID": bool(SPREADSHEET_ID),
-            "GOOGLE_CREDENTIALS": bool(GOOGLE_CREDENTIALS_JSON)
-        },
-        "stock_codes_count": len(STOCK_CODES)
-    })
-
-@app.route("/api/webhook", methods=['POST'])
-def webhook():
+def get_all_group_holdings(group_id):
+    """查看群組所有人的持股總覽"""
     try:
-        body = request.get_data(as_text=True)
-        events_data = json.loads(body)
-        events = events_data.get('events', [])
+        if not holdings_sheet:
+            return "❌ 無法連接持股資料庫"
         
-        for event in events:
-            event_type = event.get('type')
+        records = holdings_sheet.get_all_records()
+        
+        # 整理群組內所有用戶的持股
+        user_holdings_map = {}  # {user_name: {user_id, holdings: [], total_value}}
+        
+        for record in records:
+            if record['群組ID'] == group_id:
+                user_name = record['使用者名稱']
+                
+                if user_name not in user_holdings_map:
+                    user_holdings_map[user_name] = {
+                        'user_id': record['使用者ID'],
+                        'holdings': [],
+                        'total_cost': 0,
+                        'total_value': 0
+                    }
+                
+                stock_code = record['股票代號']
+                stock_name = record['股票名稱']
+                shares = int(record['總股數'])
+                avg_cost = float(record['平均成本'])
+                cost = float(record['總成本'])
+                
+                # 取得目前股價
+                current_price = get_stock_price(stock_code, stock_name)
+                current_value = shares * current_price if current_price > 0 else cost
+                
+                user_holdings_map[user_name]['holdings'].append({
+                    'stock_name': stock_name,
+                    'stock_code': stock_code,
+                    'shares': shares,
+                    'cost': cost,
+                    'current_value': current_value,
+                    'current_price': current_price,
+                    'avg_cost': avg_cost
+                })
+                
+                user_holdings_map[user_name]['total_cost'] += cost
+                user_holdings_map[user_name]['total_value'] += current_value
+        
+        if not user_holdings_map:
+            return "📊 群組內目前沒有任何人持有股票"
+        
+        # 產生報告
+        response = f"📊 群組持股總覽\n"
+        response += f"{'='*30}\n\n"
+        
+        # 統計資訊
+        total_group_value = 0
+        total_group_cost = 0
+        stock_statistics = {}  # {stock_name: total_shares}
+        
+        # 依用戶顯示持股
+        for user_name, data in sorted(user_holdings_map.items()):
+            response += f"👤 **{user_name}**\n"
             
-            if event_type == 'message' and event.get('message', {}).get('type') == 'text':
-                reply_token = event.get('replyToken')
-                message_text = event.get('message', {}).get('text', '').strip()
-                user_id = event.get('source', {}).get('userId', '')
-                group_id = event.get('source', {}).get('groupId', user_id)
+            # 顯示該用戶的每支股票
+            for holding in data['holdings']:
+                shares_display = format_shares(holding['shares'])
+                response += f"  • {holding['stock_name']}: {shares_display}"
                 
-                # 取得使用者名稱
-                user_name = "未知使用者"
-                try:
-                    from linebot import LineBotApi
-                    line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-                    if group_id != user_id:
-                        profile = line_bot_api.get_group_member_profile(group_id, user_id)
-                    else:
-                        profile = line_bot_api.get_profile(user_id)
-                    user_name = profile.display_name
-                except Exception as e:
-                    print(f"無法取得使用者名稱: {e}")
-                
-                print(f"💬 收到訊息: '{message_text}' 來自: {user_name}")
-                
-                response_text = None
-                
-                # === 處理各種指令 ===
-                
-                # 買入指令
-                if message_text.startswith('/買入'):
-                    buy_data = parse_buy_command(message_text)
-                    if buy_data:
-                        response_text = handle_buy_stock(user_id, user_name, group_id, buy_data)
-                    else:
-                        response_text = """❌ 買入指令格式錯誤
-
-✅ 支援的格式：
-
-【單筆買入】
-/買入 台積電 5張 580元 看好AI趨勢
-/買入 2330 500股 580元 技術突破
-
-【批次買入】
-/買入 台積電 2張 580元 3張 575元 看好AI趨勢
-/買入 2330 1 580元 2 575元 逢低布局
-
-💡 提示：
-• 數量可用「張」或「股」
-• 只寫數字時，小於1000視為張數"""
-
-                # 賣出指令
-                elif message_text.startswith('/賣出'):
-                    sell_data = parse_sell_command(message_text)
-                    if sell_data:
-                        response_text = create_sell_voting(user_id, user_name, group_id, sell_data)
-                    else:
-                        response_text = """❌ 賣出指令格式錯誤
-
-✅ 支援的格式：
-
-【單筆賣出】
-/賣出 台積電 2張 600元
-/賣出 2330 500股 1150元 停損
-
-【批次賣出】
-/賣出 台積電 1張 600元 2張 605元
-/賣出 2330 1 600元 2 605元 分批獲利"""
-
-                # 持股查詢
-                elif message_text.startswith('/持股'):
-                    parts = message_text.split()
-                    if len(parts) == 1:
-                        response_text = get_user_holdings(user_id, group_id)
-                    elif len(parts) == 2:
-                        stock_input = parts[1]
-                        response_text = get_user_holdings(user_id, group_id, stock_input)
-                    else:
-                        response_text = "❌ 持股查詢格式錯誤\n\n• /持股 - 查看所有持股\n• /持股 台積電 - 查看特定股票"
-
-                # 股價查詢
-                elif message_text.startswith('/股價'):
-                    parts = message_text.split()
-                    if len(parts) >= 2:
-                        stock_input = parts[1]
-                        stock_code, stock_name = get_stock_code(stock_input)
-                        
-                        if stock_code:
-                            price = get_stock_price(stock_code, stock_name)
-                            if price > 0:
-                                response_text = f"""📊 股價查詢結果
-
-🏢 股票：{stock_name} ({stock_code})
-💰 目前股價：{price:.2f}元
-⏰ 查詢時間：{datetime.now().strftime('%H:%M:%S')}"""
-                            else:
-                                response_text = f"❌ 無法取得 {stock_name} ({stock_code}) 的即時股價"
-                        else:
-                            response_text = f"❌ 找不到股票：{stock_input}"
-                    else:
-                        response_text = "❌ 請輸入要查詢的股票\n格式：/股價 股票名稱"
-
-                # 投票相關
-                elif message_text.startswith('/贊成'):
-                    parts = message_text.split()
-                    if len(parts) == 2:
-                        vote_id = parts[1]
-                        response_text = handle_vote(user_id, user_name, group_id, vote_id, 'yes')
-                    else:
-                        response_text = "❌ 格式錯誤\n正確格式：/贊成 投票ID"
-
-                elif message_text.startswith('/反對'):
-                    parts = message_text.split()
-                    if len(parts) == 2:
-                        vote_id = parts[1]
-                        response_text = handle_vote(user_id, user_name, group_id, vote_id, 'no')
-                    else:
-                        response_text = "❌ 格式錯誤\n正確格式：/反對 投票ID"
-
-                elif message_text.startswith('/投票狀態'):
-                    parts = message_text.split()
-                    if len(parts) == 2:
-                        vote_id = parts[1]
-                        response_text = get_vote_status(vote_id)
-                    else:
-                        response_text = "❌ 格式錯誤\n正確格式：/投票狀態 投票ID"
-
-                elif message_text == '/投票' or message_text == '/投票清單':
-                    response_text = list_active_votes(group_id)
-
-                # 股票清單
-                elif message_text == '/股票清單':
-                    stock_list = "📋 支援的股票清單：\n\n"
-                    for code, name in sorted(STOCK_CODES.items()):
-                        stock_list += f"• {code} - {name}\n"
-                    response_text = stock_list
-
-                # 幫助
-                elif message_text == '/幫助' or message_text == '/help':
-                    response_text = """📚 股票管理機器人使用說明
-
-💰 交易指令：
-• /買入 股票 數量 價格 理由
-• /賣出 股票 數量 價格 [備註]
-
-📊 查詢指令：
-• /持股 - 查看所有持股
-• /持股 股票名稱 - 查看特定股票
-• /股價 股票名稱 - 查詢即時股價
-
-🗳️ 投票指令：
-• /贊成 投票ID - 投贊成票
-• /反對 投票ID - 投反對票
-• /投票狀態 投票ID - 查詢狀態
-• /投票 - 列出進行中投票
-
-ℹ️ 其他指令：
-• /股票清單 - 支援的股票
-• /測試 - 系統診斷
-• /幫助 - 顯示此說明
-
-💡 批次交易範例：
-• /買入 台積電 2 580元 3 575元 加碼
-• /賣出 2330 1 600元 2 605元"""
-
-                # 測試
-                elif message_text == '/測試':
-                    test_results = "🤖 系統測試報告：\n\n"
-                    test_results += f"✅ Webhook 連接成功\n"
-                    test_results += f"✅ Google Sheets: {'已連接' if holdings_sheet else '未連接'}\n"
-                    test_results += f"✅ LINE Token: {'已設置' if LINE_CHANNEL_ACCESS_TOKEN else '未設置'}\n"
-                    test_results += f"\n📊 股價測試（台積電 2330）：\n"
+                if holding['current_price'] > 0:
+                    pnl = holding['current_value'] - holding['cost']
+                    pnl_pct = (pnl / holding['cost'] * 100) if holding['cost'] > 0 else 0
                     
-                    test_price = get_stock_price('2330', '台積電')
-                    if test_price > 0:
-                        test_results += f"✅ 股價抓取成功：{test_price}元\n"
-                    else:
-                        test_results += f"❌ 股價抓取失敗\n"
+                    if pnl > 0:
+                        response += f" 🟢"
+                    elif pnl < 0:
+                        response += f" 🔴"
                     
-                    test_results += f"\n🌐 運行環境：Vercel\n"
-                    test_results += f"⏰ 系統時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    test_results += f"📦 版本：3.3"
-                    
-                    response_text = test_results
-
-                # 發送回覆
-                if response_text and reply_token:
-                    send_reply_message(reply_token, response_text)
+                    response += f" ({pnl:+,.0f})"
+                
+                response += f"\n"
+                
+                # 統計股票持有情況
+                stock_key = f"{holding['stock_name']} ({holding['stock_code']})" if holding['stock_code'] else holding['stock_name']
+                if stock_key not in stock_statistics:
+                    stock_statistics[stock_key] = 0
+                stock_statistics[stock_key] += holding['shares']
+            
+            # 顯示該用戶的總市值
+            user_pnl = data['total_value'] - data['total_cost']
+            user_pnl_pct = (user_pnl / data['total_cost'] * 100) if data['total_cost'] > 0 else 0
+            
+            response += f"  💰 總市值：{data['total_value']:,.0f}元"
+            
+            if user_pnl != 0:
+                if user_pnl > 0:
+                    response += f" 🟢"
+                else:
+                    response += f" 🔴"
+                response += f" ({user_pnl:+,.0f}, {user_pnl_pct:+.1f}%)"
+            
+            response += f"\n\n"
+            
+            total_group_value += data['total_value']
+            total_group_cost += data['total_cost']
         
-        return jsonify({"status": "OK"}), 200
+        # 群組總計
+        response += f"{'='*30}\n"
+        response += f"📈 **群組統計**\n"
+        response += f"• 總成員數：{len(user_holdings_map)}人\n"
+        response += f"• 總投資成本：{total_group_cost:,.0f}元\n"
+        response += f"• 總市值：{total_group_value:,.0f}元\n"
+        
+        group_pnl = total_group_value - total_group_cost
+        if group_pnl != 0:
+            group_pnl_pct = (group_pnl / total_group_cost * 100) if total_group_cost > 0 else 0
+            if group_pnl > 0:
+                response += f"• 總損益：🟢 {group_pnl:+,.0f}元 ({group_pnl_pct:+.1f}%)\n"
+            else:
+                response += f"• 總損益：🔴 {group_pnl:+,.0f}元 ({group_pnl_pct:+.1f}%)\n"
+        
+        # 熱門持股TOP 5
+        if stock_statistics:
+            response += f"\n🏆 **熱門持股 TOP 5**\n"
+            sorted_stocks = sorted(stock_statistics.items(), key=lambda x: x[1], reverse=True)[:5]
+            
+            for i, (stock_name, total_shares) in enumerate(sorted_stocks, 1):
+                response += f"{i}. {stock_name}: {format_shares(total_shares)}\n"
+        
+        return response
         
     except Exception as e:
-        print(f"❌ Webhook 處理錯誤: {e}")
+        print(f"❌ 查詢群組持股錯誤: {e}")
         import traceback
         print(traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+        return f"❌ 查詢群組持股時發生錯誤: {str(e)}"
 
-if __name__ == "__main__":
-    app.run(debug=True)
+def create_sell_voting(user_id, user_name, group_id, sell_data):
+    """創建賣出投票"""
+    try:
+        if not holdings_sheet:
+            return "❌ 無法連接持股資料庫"
+        
+        records = holdings_sheet.get_all_records()
+        user_holding = None
+        
+        for record in records:
+            if (record['使用者ID'] == user_id and 
+                record['群組ID'] == group_id and
+                (record['股票代號'] == sell_data['stock_code'] or 
+                 record['股票名稱'] == sell_data['stock_name'])):
+                user_holding = record
+                break
+        
+        if not user_holding:
+            return f"❌ 您沒有持有 {sell_data['stock_name']}"
+        
+        current_shares = int(user_holding['總股數'])
+        sell_shares = sell_data.get('total_shares', sell_data.get('shares', 0))
+        
+        if current_shares < sell_shares:
+            return f"❌ 持股不足！\n您只有 {format_shares(current_shares)}，無法賣出 {format_shares(sell_shares)}"
+        
+        # 取得群組成員數
+        group_member_count = get_group_member_count(group_id, user_id)
+        
+        vote_id = str(uuid.uuid4())[:8]
+        current_time = datetime.now()
+        deadline = current_time + timedelta(hours=24)
+        
+        # 處理批次或單一價格
+        if sell_data.get('is_batch') and len(sell_data.get('transactions', [])) > 1:
+            price_info = json.dumps([
+                {'shares': t['shares'], 'price': t['price']} 
+                for t in sell_data['transactions']
+            ])
+            display_price = sell_data.get('avg_price', sell_data.get('price', 0))
+        else:
+            price_info = str(sell_data.get('price', 0))
+            display_price = sell_data.get('price', sell_data.get('avg_price', 0))
+        
+        if voting_sheet:
+            try:
+                vote_data = [
+                    vote_id, user_id, user_name, sell_data['stock_code'], sell_data['stock_name'],
+                    sell_shares, display_price, group_id, '進行中', 0, 0,
+                    current_time.strftime('%Y-%m-%d %H:%M:%S'),
+                    deadline.strftime('%Y-%m-%d %H:%M:%S'),
+                    '', f"群組人數:{group_member_count}|價格詳情:{price_info}|{sell_data.get('note', '')}"
+                ]
+                voting_sheet.append_row(vote_data)
+            except Exception as e:
+                print(f"記錄投票到 Google Sheets 失敗: {e}")
+        
+        active_votes[vote_id] = {
+            'initiator_id': user_id,
+            'initiator_name': user_name,
+            'group_id': group_id,
+            'stock_code': sell_data['stock_code'],
+            'stock_name': sell_data['stock_name'],
+            'shares': sell_shares,
+            'price': display_price,
+            'price_details': sell_data.get('transactions', [{'shares': sell_shares, 'price': display_price}]),
+            'deadline': deadline,
+            'yes_votes': set(),
+            'no_votes': set(),
+            'voted_users': {},
+            'status': 'active',
+            'avg_cost': float(user_holding['平均成本']),
+            'note': sell_data.get('note', ''),
+            'group_member_count': group_member_count,
+            'required_votes': 1 if group_member_count == 1 else max(2, group_member_count // 2 + 1)  # 私訊時只需1票
+        }
+        
+        avg_cost = float(user_holding['平均成本'])
+        expected_profit = (display_price - avg_cost) * sell_shares
+        profit_percentage = ((display_price - avg_cost) / avg_cost * 100) if avg_cost > 0 else 0
+        
+        response = f"""📊 賣出投票已發起！
+
+🎯 投票ID：{vote_id}
+👤 發起人：{user_name}
+🏢 股票：{sell_data['stock_name']} ({sell_data['stock_code']})
+📉 賣出數量：{format_shares(sell_shares)}"""
+        
+        if sell_data.get('is_batch') and len(sell_data.get('transactions', [])) > 1:
+            response += f"\n💰 賣出價格（批次）："
+            for trans in sell_data['transactions']:
+                response += f"\n  • {format_shares(trans['shares'])} @ {trans['price']:.2f}元"
+            response += f"\n  • 平均價：{display_price:.2f}元"
+        else:
+            response += f"\n💰 賣出價格：{display_price:.2f}元"
+        
+        response += f"""
+📈 平均成本：{avg_cost:.2f}元
+💵 預期損益：{expected_profit:+,.0f}元 ({profit_percentage:+.2f}%)
+⏰ 投票截止：{deadline.strftime('%m/%d %H:%M')}
+
+👥 群組資訊："""
+        
+        # 根據情況顯示不同資訊
+        if group_member_count == 1:
+            response += f"\n• 私訊模式：您自己決定即可"
+            response += f"\n• 通過門檻：1票（您自己）"
+        else:
+            response += f"\n• 群組成員：{group_member_count}人（不含機器人）"
+            response += f"\n• 通過門檻：{active_votes[vote_id]['required_votes']}票（過半數）"
+        
+        response += f"""
+
+📝 投票方式：
+• 贊成請輸入：/贊成 {vote_id}
+• 反對請輸入：/反對 {vote_id}
+• 查看狀態：/投票狀態 {vote_id}"""
+        
+        if sell_data.get('note'):
+            response += f"\n\n💭 備註：{sell_data['note']}"
+        
+        return response
+        
+    except Exception as e:
+        print(f"創建投票錯誤: {e}")
+        import traceback
+        print(traceback.format_exc())
+        return f"❌ 創建投票時發生錯誤: {str(e)[:200]}"
