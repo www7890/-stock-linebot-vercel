@@ -1015,7 +1015,7 @@ def create_sell_voting(user_id, user_name, group_id, sell_data):
             'avg_cost': float(user_holding['平均成本']),
             'note': sell_data.get('note', ''),
             'group_member_count': group_member_count,
-            'required_votes': max(1, group_member_count // 2 + 1) if group_member_count > 0 else 2
+            'required_votes': 1 if group_member_count == 1 else max(2, group_member_count // 2 + 1)  # 私訊時只需1票
         }
         
         avg_cost = float(user_holding['平均成本'])
@@ -1042,9 +1042,17 @@ def create_sell_voting(user_id, user_name, group_id, sell_data):
 💵 預期損益：{expected_profit:+,.0f}元 ({profit_percentage:+.2f}%)
 ⏰ 投票截止：{deadline.strftime('%m/%d %H:%M')}
 
-👥 群組資訊：
-• 群組成員：{group_member_count if group_member_count > 0 else '私訊'}人
-• 通過門檻：{active_votes[vote_id]['required_votes']}票（過半數）
+👥 群組資訊："""
+        
+        # 根據情況顯示不同資訊
+        if group_member_count == 1:
+            response += f"\n• 私訊模式：您自己決定即可"
+            response += f"\n• 通過門檻：1票（您自己）"
+        else:
+            response += f"\n• 群組成員：{group_member_count}人（不含機器人）"
+            response += f"\n• 通過門檻：{active_votes[vote_id]['required_votes']}票（過半數）"
+        
+        response += f"""
 
 📝 投票方式：
 • 贊成請輸入：/贊成 {vote_id}
@@ -1063,10 +1071,11 @@ def create_sell_voting(user_id, user_name, group_id, sell_data):
         return f"❌ 創建投票時發生錯誤: {str(e)[:200]}"
 
 def get_group_member_count(group_id, user_id):
-    """取得群組成員數量"""
+    """取得群組成員數量（排除機器人自己）"""
     try:
+        # 私訊情況：只有使用者一人（不算機器人）
         if group_id == user_id:
-            return 0
+            return 1  # 只有發起人自己
         
         if LINE_CHANNEL_ACCESS_TOKEN:
             from linebot import LineBotApi
@@ -1076,16 +1085,20 @@ def get_group_member_count(group_id, user_id):
             
             try:
                 group_member_count = line_bot_api.get_group_members_count(group_id)
-                return group_member_count.count
+                # 減去機器人自己，只計算真人數量
+                human_count = group_member_count.count - 1
+                return max(1, human_count)  # 至少要有1人（發起人）
             except LineBotApiError as e:
                 print(f"無法取得群組成員數: {e}")
-                return 5
+                # 預設假設有4個真人（不含機器人）
+                return 4
         
-        return 5
+        # 無法取得時，預設4個真人
+        return 4
         
     except Exception as e:
         print(f"取得群組成員數錯誤: {e}")
-        return 5
+        return 4
 
 def handle_vote(user_id, user_name, group_id, vote_id, vote_type):
     """處理投票"""
