@@ -1,50 +1,73 @@
-# api/webhook.py
-from flask import Flask, request, abort
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import *
-import gspread
+from flask import Flask, request, jsonify
+import os
 import json
 import re
 import datetime
-import os
+import traceback
+
+# 先檢查基本匯入
+try:
+    from linebot import LineBotApi, WebhookHandler
+    from linebot.exceptions import InvalidSignatureError
+    from linebot.models import *
+    print("✅ LINE SDK 匯入成功")
+except Exception as e:
+    print(f"❌ LINE SDK 匯入失敗: {e}")
+
+try:
+    import gspread
+    print("✅ gspread 匯入成功")
+except Exception as e:
+    print(f"❌ gspread 匯入失敗: {e}")
 
 app = Flask(__name__)
 
 # 從環境變數讀取設定
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', 'fjh1kesK+73mjZUZtShY/bT95tCOOLSXZv0jmxF/Nn9WN8WPkD8fW5IM7Vb/1dfhXq6Dn+eNRCbmYrHsMYyg0DcAZoMrxJvU9NI5lU7NvQ0Y4uyM1zi6BBTlHvKIOKcuaaxNop0JHJLl/xG+9m//KAdB04t89/1O/w1cDnyilFU=')
-LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET', '3616577e195d8536f6c8183f49b491a9')
-SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID', '1ixP-uwSaCdsU3RhB_Rt6JouxUFyz0PhfD3BNEM_IXww')
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
+LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET') 
+SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID')
+GOOGLE_CREDENTIALS_JSON = os.environ.get('GOOGLE_CREDENTIALS')
 
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
+print(f"Access Token 存在: {bool(LINE_CHANNEL_ACCESS_TOKEN)}")
+print(f"Channel Secret 存在: {bool(LINE_CHANNEL_SECRET)}")
+print(f"Spreadsheet ID 存在: {bool(SPREADSHEET_ID)}")
+print(f"Google Credentials 存在: {bool(GOOGLE_CREDENTIALS_JSON)}")
 
-# Google Sheets 認證（使用環境變數）
-def init_google_sheets():
+# 初始化 LINE Bot
+line_bot_api = None
+handler = None
+
+if LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET:
     try:
-        # 從環境變數讀取 Google 認證資訊
-        credentials_json = os.environ.get('GOOGLE_CREDENTIALS')
-        if credentials_json:
-            credentials_info = json.loads(credentials_json)
-            gc = gspread.service_account_from_dict(credentials_info)
-        else:
-            # 備用：如果有 credentials.json 檔案
-            gc = gspread.service_account(filename='credentials.json')
+        line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+        handler = WebhookHandler(LINE_CHANNEL_SECRET)
+        print("✅ LINE Bot 初始化成功")
+    except Exception as e:
+        print(f"❌ LINE Bot 初始化失敗: {e}")
+
+# Google Sheets 初始化
+transaction_sheet = None
+voting_sheet = None
+
+def init_google_sheets():
+    global transaction_sheet, voting_sheet
+    try:
+        if not GOOGLE_CREDENTIALS_JSON:
+            print("❌ 沒有 Google 認證資訊")
+            return
         
+        credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
+        gc = gspread.service_account_from_dict(credentials_info)
         spreadsheet = gc.open_by_key(SPREADSHEET_ID)
         transaction_sheet = spreadsheet.worksheet('交易紀錄')
         voting_sheet = spreadsheet.worksheet('投票紀錄')
         print("✅ Google Sheets 連接成功")
-        return transaction_sheet, voting_sheet
     except Exception as e:
         print(f"❌ Google Sheets 連接失敗: {e}")
-        return None, None
+        print(f"錯誤詳情: {traceback.format_exc()}")
 
-# 初始化（在 serverless 環境中每次請求都會執行）
-transaction_sheet, voting_sheet = init_google_sheets()
-
-# 本地儲存（Vercel 的暫存儲存）
-local_transactions = []
+# 嘗試初始化 Google Sheets
+init_google_sheets()
 
 # 解析買入指令
 def parse_buy_command(text):
@@ -114,6 +137,7 @@ def handle_buy_stock(event, buy_data):
         
     except Exception as e:
         print(f"❌ 處理買入錯誤: {e}")
+        print(traceback.format_exc())
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text="❌ 處理買入指令時發生錯誤，請稍後再試")
@@ -179,6 +203,7 @@ def handle_stock_query(event, user_id):
         
     except Exception as e:
         print(f"❌ 查詢持股錯誤: {e}")
+        print(traceback.format_exc())
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text="❌ 查詢持股時發生錯誤")
@@ -196,6 +221,7 @@ def get_help_message():
 📊 查詢功能：
 - 持股：查看您的持股狀況
 - 幫助：顯示此說明
+- 狀態：查看系統狀態
 
 ⚠️ 注意事項：
 - 所有交易都會記錄在案
@@ -206,92 +232,104 @@ def get_help_message():
 - 運行環境：Vercel Serverless
 - 24小時穩定運行 🚀"""
 
-# Webhook 處理
+# 健康檢查
 @app.route("/", methods=['GET'])
 def health_check():
-    return "🤖 股票管理 LINE Bot 運行正常！"
+    status = {
+        "status": "running",
+        "line_bot": bool(line_bot_api),
+        "google_sheets": bool(transaction_sheet),
+        "timestamp": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+    return jsonify(status)
 
+# Webhook 處理
 @app.route("/api/webhook", methods=['POST'])
 def webhook():
-    signature = request.headers.get('X-Line-Signature', '')
-    body = request.get_data(as_text=True)
-    
     try:
+        if not line_bot_api or not handler:
+            print("❌ LINE Bot 未初始化")
+            return jsonify({"error": "LINE Bot not initialized"}), 500
+        
+        signature = request.headers.get('X-Line-Signature', '')
+        body = request.get_data(as_text=True)
+        
+        print(f"📨 收到 webhook 請求，signature: {signature[:20]}...")
+        
         handler.handle(body, signature)
+        return 'OK'
+        
     except InvalidSignatureError:
         print("❌ Invalid signature")
-        abort(400)
+        return jsonify({"error": "Invalid signature"}), 400
     except Exception as e:
         print(f"❌ Webhook 處理錯誤: {e}")
-        abort(500)
-    
-    return 'OK'
+        print(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
 
 # 處理文字訊息
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    text = event.message.text.strip()
-    user_id = event.source.user_id
-    
-    print(f"📨 收到訊息: {text}")
-    
-    try:
-        # 檢查買入指令
-        buy_data = parse_buy_command(text)
-        if buy_data:
-            handle_buy_stock(event, buy_data)
-            return
+if handler:
+    @handler.add(MessageEvent, message=TextMessage)
+    def handle_message(event):
+        text = event.message.text.strip()
+        user_id = event.source.user_id
         
-        # 檢查其他指令
-        if text in ['持股', '我的股票']:
-            handle_stock_query(event, user_id)
-            return
+        print(f"📨 收到訊息: {text}")
         
-        if text in ['幫助', '指令', 'help', '說明']:
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text=get_help_message())
-            )
-            return
-        
-        # 測試指令
-        if text == '測試':
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="🤖 機器人運作正常！運行在 Vercel 雲端平台\n輸入「幫助」查看使用說明")
-            )
-            return
-        
-        # 系統狀態
-        if text == '狀態':
-            status_msg = f"""🔧 系統狀態報告：
+        try:
+            # 檢查買入指令
+            buy_data = parse_buy_command(text)
+            if buy_data:
+                handle_buy_stock(event, buy_data)
+                return
+            
+            # 檢查其他指令
+            if text in ['持股', '我的股票']:
+                handle_stock_query(event, user_id)
+                return
+            
+            if text in ['幫助', '指令', 'help', '說明']:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text=get_help_message())
+                )
+                return
+            
+            # 測試指令
+            if text == '測試':
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text="🤖 機器人運作正常！運行在 Vercel 雲端平台\n輸入「幫助」查看使用說明")
+                )
+                return
+            
+            # 系統狀態
+            if text == '狀態':
+                status_msg = f"""🔧 系統狀態報告：
 📊 Google Sheets: {'✅ 連接正常' if transaction_sheet else '❌ 連接失敗'}
 🌐 平台：Vercel Serverless
 ⏰ 時間：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 🚀 狀態：正常運行"""
+                
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text=status_msg)
+                )
+                return
             
+            # 預設回應
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text=status_msg)
+                TextSendMessage(text="❓ 指令格式不正確，請輸入「幫助」查看使用說明")
             )
-            return
-        
-        # 預設回應
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text="❓ 指令格式不正確，請輸入「幫助」查看使用說明")
-        )
-        
-    except Exception as e:
-        print(f"❌ 處理訊息錯誤: {e}")
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text="❌ 處理訊息時發生錯誤，請稍後再試")
-        )
-
-# Vercel 需要的主函數
-def handler_func(request):
-    return app(request.environ, lambda *args: None)
+            
+        except Exception as e:
+            print(f"❌ 處理訊息錯誤: {e}")
+            print(traceback.format_exc())
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="❌ 處理訊息時發生錯誤，請稍後再試")
+            )
 
 if __name__ == "__main__":
     app.run(debug=True)
