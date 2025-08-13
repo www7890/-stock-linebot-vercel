@@ -415,90 +415,142 @@ def parse_sell_command(text):
         stock_input = parts[0]
         remaining = parts[1]
         
-        # 匹配: 數字+張/股 數字+元
-        pattern = r'(\d+(?:\.\d+)?)\s*(張|股)?\s+(\d+(?:\.\d+)?)\s*元'
-        matches = re.findall(pattern, remaining)
+        # 先嘗試批次模式：數量 價格 的配對（可能有多個）
+        batch_pattern = r'(\d+(?:\.\d+)?)\s*(張|股)?\s+(\d+(?:\.\d+)?)\s*元'
+        matches = re.findall(batch_pattern, remaining)
         
-        if not matches:
-            # 單一價格格式
-            single_pattern = r'^(.+?)\s+(\d+(?:\.\d+)?)\s*元(?:\s+(.+))?$'
-            single_match = re.match(single_pattern, remaining)
+        # 如果找到2個或以上匹配，視為批次交易
+        if len(matches) >= 2:
+            # 找備註
+            last_match = matches[-1]
+            last_pattern = f"{last_match[0]}\\s*{last_match[1] if last_match[1] else ''}\\s+{last_match[2]}\\s*元"
             
-            if single_match:
-                shares_text = single_match.group(1).strip()
-                price = float(single_match.group(2))
-                note = single_match.group(3).strip() if single_match.group(3) else ''
+            last_match_obj = None
+            for match_obj in re.finditer(last_pattern, remaining):
+                last_match_obj = match_obj
+            
+            if last_match_obj:
+                note_start = last_match_obj.end()
+                note = remaining[note_start:].strip() if note_start < len(remaining) else ""
+            else:
+                note = ""
+            
+            stock_code, stock_name = get_stock_code(stock_input)
+            transactions = []
+            total_shares = 0
+            total_amount = 0
+            
+            for match in matches:
+                quantity = float(match[0])
+                unit = match[1] if match[1] else ''
+                price = float(match[2])
                 
-                shares = parse_shares(shares_text)
-                if shares > 0:
-                    stock_code, stock_name = get_stock_code(stock_input)
-                    return {
-                        'stock_code': stock_code,
-                        'stock_name': stock_name,
-                        'shares': shares,
-                        'price': price,
-                        'note': note,
-                        'is_batch': False
-                    }
-            return None
+                if unit == '股':
+                    shares = int(quantity)
+                elif unit == '張':
+                    shares = int(quantity * 1000)
+                else:
+                    if quantity >= 1000:
+                        shares = int(quantity)
+                    else:
+                        shares = int(quantity * 1000)
+                
+                amount = shares * price
+                total_shares += shares
+                total_amount += amount
+                
+                transactions.append({
+                    'shares': shares,
+                    'price': price,
+                    'amount': amount
+                })
+            
+            return {
+                'stock_code': stock_code,
+                'stock_name': stock_name,
+                'transactions': transactions,
+                'total_shares': total_shares,
+                'total_amount': total_amount,
+                'avg_price': total_amount / total_shares if total_shares > 0 else 0,
+                'price': total_amount / total_shares if total_shares > 0 else 0,  # 相容性
+                'note': note,
+                'is_batch': True
+            }
         
-        # 找備註
-        last_match = matches[-1]
-        last_pattern = f"{last_match[0]}\\s*{last_match[1] if last_match[1] else ''}\\s+{last_match[2]}\\s*元"
+        # 單一價格格式：嘗試多種解析方式
+        # 格式1: 500股 1150元 停損
+        pattern1 = r'^(\d+(?:\.\d+)?)\s*(張|股)?\s+(\d+(?:\.\d+)?)\s*元\s*(.*)$'
+        match1 = re.match(pattern1, remaining)
         
-        last_match_obj = None
-        for match_obj in re.finditer(last_pattern, remaining):
-            last_match_obj = match_obj
+        if match1:
+            quantity = float(match1.group(1))
+            unit = match1.group(2) if match1.group(2) else ''
+            price = float(match1.group(3))
+            note = match1.group(4).strip() if match1.group(4) else ''
+            
+            # 計算股數
+            if unit == '股':
+                shares = int(quantity)
+            elif unit == '張':
+                shares = int(quantity * 1000)
+            else:
+                # 沒有單位時，小於1000視為張
+                if quantity < 1000:
+                    shares = int(quantity * 1000)
+                else:
+                    shares = int(quantity)
+            
+            stock_code, stock_name = get_stock_code(stock_input)
+            
+            return {
+                'stock_code': stock_code,
+                'stock_name': stock_name,
+                'shares': shares,
+                'price': price,
+                'note': note,
+                'is_batch': False,
+                'total_shares': shares,  # 加入 total_shares
+                'avg_price': price  # 加入 avg_price
+            }
         
-        if last_match_obj:
-            note_start = last_match_obj.end()
-            note = remaining[note_start:].strip() if note_start < len(remaining) else ""
-        else:
-            note = ""
+        # 格式2: 2張 600元 (沒有備註)
+        pattern2 = r'^(\d+(?:\.\d+)?)\s*(張|股)?\s+(\d+(?:\.\d+)?)\s*元\s*$'
+        match2 = re.match(pattern2, remaining)
         
-        stock_code, stock_name = get_stock_code(stock_input)
-        transactions = []
-        total_shares = 0
-        total_amount = 0
-        
-        for match in matches:
-            quantity = float(match[0])
-            unit = match[1] if match[1] else ''
-            price = float(match[2])
+        if match2:
+            quantity = float(match2.group(1))
+            unit = match2.group(2) if match2.group(2) else ''
+            price = float(match2.group(3))
             
             if unit == '股':
                 shares = int(quantity)
             elif unit == '張':
                 shares = int(quantity * 1000)
             else:
-                if quantity >= 1000:
-                    shares = int(quantity)
-                else:
+                if quantity < 1000:
                     shares = int(quantity * 1000)
+                else:
+                    shares = int(quantity)
             
-            amount = shares * price
-            total_shares += shares
-            total_amount += amount
+            stock_code, stock_name = get_stock_code(stock_input)
             
-            transactions.append({
+            return {
+                'stock_code': stock_code,
+                'stock_name': stock_name,
                 'shares': shares,
                 'price': price,
-                'amount': amount
-            })
+                'note': '',
+                'is_batch': False,
+                'total_shares': shares,  # 加入 total_shares
+                'avg_price': price  # 加入 avg_price
+            }
         
-        return {
-            'stock_code': stock_code,
-            'stock_name': stock_name,
-            'transactions': transactions,
-            'total_shares': total_shares,
-            'total_amount': total_amount,
-            'avg_price': total_amount / total_shares if total_shares > 0 else 0,
-            'note': note,
-            'is_batch': True
-        }
+        return None
         
     except Exception as e:
         print(f"解析賣出錯誤: {e}")
+        import traceback
+        print(traceback.format_exc())
         return None
 
 def handle_buy_stock(user_id, user_name, group_id, buy_data):
@@ -928,20 +980,23 @@ def create_sell_voting(user_id, user_name, group_id, sell_data):
                 {'shares': t['shares'], 'price': t['price']} 
                 for t in sell_data['transactions']
             ])
-            display_price = sell_data['avg_price']
+            display_price = sell_data.get('avg_price', sell_data.get('price', 0))
         else:
-            price_info = str(sell_data['price'])
-            display_price = sell_data['price']
+            price_info = str(sell_data.get('price', 0))
+            display_price = sell_data.get('price', sell_data.get('avg_price', 0))
         
         if voting_sheet:
-            vote_data = [
-                vote_id, user_id, user_name, sell_data['stock_code'], sell_data['stock_name'],
-                sell_shares, display_price, group_id, '進行中', 0, 0,
-                current_time.strftime('%Y-%m-%d %H:%M:%S'),
-                deadline.strftime('%Y-%m-%d %H:%M:%S'),
-                '', f"群組人數:{group_member_count}|價格詳情:{price_info}|{sell_data.get('note', '')}"
-            ]
-            voting_sheet.append_row(vote_data)
+            try:
+                vote_data = [
+                    vote_id, user_id, user_name, sell_data['stock_code'], sell_data['stock_name'],
+                    sell_shares, display_price, group_id, '進行中', 0, 0,
+                    current_time.strftime('%Y-%m-%d %H:%M:%S'),
+                    deadline.strftime('%Y-%m-%d %H:%M:%S'),
+                    '', f"群組人數:{group_member_count}|價格詳情:{price_info}|{sell_data.get('note', '')}"
+                ]
+                voting_sheet.append_row(vote_data)
+            except Exception as e:
+                print(f"記錄投票到 Google Sheets 失敗: {e}")
         
         active_votes[vote_id] = {
             'initiator_id': user_id,
@@ -1003,7 +1058,9 @@ def create_sell_voting(user_id, user_name, group_id, sell_data):
         
     except Exception as e:
         print(f"創建投票錯誤: {e}")
-        return f"❌ 創建投票時發生錯誤: {str(e)}"
+        import traceback
+        print(traceback.format_exc())
+        return f"❌ 創建投票時發生錯誤: {str(e)[:200]}"
 
 def get_group_member_count(group_id, user_id):
     """取得群組成員數量"""
@@ -1256,12 +1313,12 @@ def send_reply_message(reply_token, message_text):
 def health_check():
     return jsonify({
         "status": "running",
-        "message": "🤖 完整版股票管理 LINE Bot v3.2",
-        "version": "3.2",
+        "message": "🤖 完整版股票管理 LINE Bot v3.3",
+        "version": "3.3",
         "timestamp": datetime.now().isoformat(),
         "features": [
             "買入股票（支援批次）",
-            "賣出投票（支援批次）",
+            "賣出投票（支援批次）- 已修復",
             "持股查詢",
             "投票系統",
             "即時股價",
@@ -1346,7 +1403,7 @@ def webhook():
 
 【單筆賣出】
 /賣出 台積電 2張 600元
-/賣出 2330 1000股 600元 獲利了結
+/賣出 2330 500股 1150元 停損
 
 【批次賣出】
 /賣出 台積電 1張 600元 2張 605元
@@ -1464,7 +1521,7 @@ def webhook():
                     
                     test_results += f"\n🌐 運行環境：Vercel\n"
                     test_results += f"⏰ 系統時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    test_results += f"📦 版本：3.2"
+                    test_results += f"📦 版本：3.3"
                     
                     response_text = test_results
 
