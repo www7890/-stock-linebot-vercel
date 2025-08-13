@@ -249,7 +249,14 @@ def get_stock_price(stock_code, stock_name):
     """抓取股票即時價格（多重來源）"""
     if not stock_code:
         print(f"⚠️ 無股票代號：{stock_name}")
-        return 0
+        # 嘗試搜尋股票代號
+        code, name = search_stock_from_web(stock_name)
+        if code:
+            stock_code = code
+            stock_name = name
+            print(f"✅ 找到股票代號: {stock_code} {stock_name}")
+        else:
+            return 0
     
     print(f"📊 開始抓取股價：{stock_code} {stock_name}")
     
@@ -266,7 +273,7 @@ def get_stock_price(stock_code, stock_name):
         print(f"✅ TWSE API 成功：{price}")
         return price
     
-    print(f"❌ 無法取得股價")
+    print(f"❌ 無法取得股價: {stock_code} {stock_name}")
     return 0
 
 def parse_shares(shares_text):
@@ -1820,8 +1827,12 @@ def webhook():
                 elif message_text.startswith('/股價'):
                     parts = message_text.split()
                     if len(parts) >= 2:
-                        stock_input = parts[1]
+                        stock_input = ' '.join(parts[1:])  # 支援多字股票名稱
+                        print(f"查詢股價: {stock_input}")
+                        
+                        # 取得股票代號
                         stock_code, stock_name = get_stock_code(stock_input)
+                        print(f"股票代號: {stock_code}, 名稱: {stock_name}")
                         
                         if stock_code:
                             price = get_stock_price(stock_code, stock_name)
@@ -1832,11 +1843,20 @@ def webhook():
 💰 目前股價：{price:.2f}元
 ⏰ 查詢時間：{datetime.now().strftime('%H:%M:%S')}"""
                             else:
-                                response_text = f"❌ 無法取得 {stock_name} ({stock_code}) 的即時股價"
+                                response_text = f"❌ 無法取得 {stock_name} ({stock_code}) 的即時股價\n\n可能原因：\n1. 股市休市中\n2. 網路連線問題\n3. 股票代號錯誤"
                         else:
-                            response_text = f"❌ 找不到股票：{stock_input}"
+                            # 沒有找到股票代號，可能是新股或錯誤
+                            response_text = f"""❌ 找不到股票：{stock_input}
+
+請確認：
+1. 股票名稱或代號是否正確
+2. 是否為新上市櫃股票
+
+您可以試試：
+• 使用股票代號查詢（如：2330）
+• 使用完整股票名稱（如：台積電）"""
                     else:
-                        response_text = "❌ 請輸入要查詢的股票\n格式：/股價 股票名稱"
+                        response_text = "❌ 請輸入要查詢的股票\n\n格式：/股價 股票名稱\n範例：/股價 台積電"
 
                 # 投票相關
                 elif message_text.startswith('/贊成'):
