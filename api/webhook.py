@@ -1,450 +1,399 @@
-# 在原有的程式碼中加入以下賣出相關功能
-
-import uuid
+import re
+import datetime
 from datetime import datetime, timedelta
 
-# 儲存進行中的投票（在實際部署時應該存在資料庫或 Redis）
-active_votes = {}
-
-def create_sell_voting(user_id, user_name, group_id, sell_data):
-    """創建賣出投票"""
+def parse_batch_buy_command(text):
+    """
+    解析批次買入指令，支援多個價格（簡化版，不需要@）
+    格式: /買入 台積電 2張 580元 3張 575元 看好AI趨勢
+    或: /買入 2330 1000股 580元 500股 575元 看好AI
+    """
     try:
-        # 檢查使用者是否有足夠的持股
-        if not holdings_sheet:
-            return "❌ 無法連接持股資料庫"
+        # 移除開頭的 /買入
+        text = text[3:].strip()
         
-        records = holdings_sheet.get_all_records()
-        user_holding = None
+        # 分離股票名稱
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            return None
         
-        for record in records:
-            if (record['使用者ID'] == user_id and 
-                record['群組ID'] == group_id and
-                (record['股票代號'] == sell_data['stock_code'] or 
-                 record['股票名稱'] == sell_data['stock_name'])):
-                user_holding = record
-                break
+        stock_input = parts[0]
+        remaining = parts[1]
         
-        if not user_holding:
-            return f"❌ 您沒有持有 {sell_data['stock_name']}"
+        # 新的解析模式：數量 價格 的配對
+        # 匹配: 數字+張/股 數字+元
+        pattern = r'(\d+(?:\.\d+)?)\s*(張|股)?\s+(\d+(?:\.\d+)?)\s*元'
+        matches = re.findall(pattern, remaining)
         
-        current_shares = int(user_holding['總股數'])
-        if current_shares < sell_data['shares']:
-            return f"❌ 持股不足！\n您只有 {format_shares(current_shares)}，無法賣出 {format_shares(sell_data['shares'])}"
+        if not matches:
+            # 如果沒有匹配到批次格式，嘗試單一價格格式
+            # 格式: /買入 股票 數量 價格 理由
+            single_pattern = r'^(.+?)\s+(\d+(?:\.\d+)?)\s*元\s+(.+)$'
+            single_match = re.match(single_pattern, remaining)
+            
+            if single_match:
+                shares_text = single_match.group(1).strip()
+                price = float(single_match.group(2))
+                reason = single_match.group(3).strip()
+                
+                shares = parse_shares(shares_text)
+                if shares > 0:
+                    stock_code, stock_name = get_stock_code(stock_input)
+                    return {
+                        'stock_code': stock_code,
+                        'stock_name': stock_name,
+                        'shares': shares,
+                        'price': price,
+                        'reason': reason,
+                        'is_batch': False
+                    }
+            return None
         
-        # 創建投票ID
-        vote_id = str(uuid.uuid4())[:8]
-        current_time = datetime.now()
-        deadline = current_time + timedelta(hours=24)  # 24小時投票期限
+        # 找出理由（在最後一個價格之後的文字）
+        last_match = matches[-1]
+        # 構建最後一個匹配的完整字符串
+        last_pattern = f"{last_match[0]}\\s*{last_match[1] if last_match[1] else ''}\\s+{last_match[2]}\\s*元"
         
-        # 記錄到投票表
-        if voting_sheet:
-            vote_data = [
-                vote_id,
-                user_id,
-                user_name,
-                sell_data['stock_code'],
-                sell_data['stock_name'],
-                sell_data['shares'],
-                sell_data['price'],
-                group_id,
-                '進行中',  # 投票狀態
-                0,  # 贊成票數
-                0,  # 反對票數
-                current_time.strftime('%Y-%m-%d %H:%M:%S'),
-                deadline.strftime('%Y-%m-%d %H:%M:%S'),
-                '',  # 結果
-                sell_data.get('note', '')  # 備註
-            ]
-            voting_sheet.append_row(vote_data)
+        # 使用 re.search 找到最後一個匹配的位置
+        last_match_obj = None
+        for match_obj in re.finditer(last_pattern, remaining):
+            last_match_obj = match_obj
         
-        # 儲存投票資訊到記憶體（實際應用應該用資料庫）
-        active_votes[vote_id] = {
-            'initiator_id': user_id,
-            'initiator_name': user_name,
-            'group_id': group_id,
-            'stock_code': sell_data['stock_code'],
-            'stock_name': sell_data['stock_name'],
-            'shares': sell_data['shares'],
-            'price': sell_data['price'],
-            'deadline': deadline,
-            'yes_votes': set(),
-            'no_votes': set(),
-            'status': 'active',
-            'avg_cost': float(user_holding['平均成本']),
-            'note': sell_data.get('note', '')
+        if last_match_obj:
+            reason_start = last_match_obj.end()
+            reason = remaining[reason_start:].strip() if reason_start < len(remaining) else "批次買入"
+        else:
+            reason = "批次買入"
+        
+        # 處理每個價格區間
+        stock_code, stock_name = get_stock_code(stock_input)
+        transactions = []
+        total_shares = 0
+        total_amount = 0
+        
+        for match in matches:
+            quantity = float(match[0])
+            unit = match[1] if match[1] else ''
+            price = float(match[2])
+            
+            # 判斷單位
+            if unit == '股':
+                shares = int(quantity)
+            elif unit == '張':
+                shares = int(quantity * 1000)
+            else:
+                # 沒有單位時的判斷邏輯
+                if quantity >= 1000:
+                    shares = int(quantity)  # 大於1000視為股數
+                else:
+                    shares = int(quantity * 1000)  # 小於1000視為張數
+            
+            amount = shares * price
+            total_shares += shares
+            total_amount += amount
+            
+            transactions.append({
+                'shares': shares,
+                'price': price,
+                'amount': amount
+            })
+        
+        return {
+            'stock_code': stock_code,
+            'stock_name': stock_name,
+            'transactions': transactions,
+            'total_shares': total_shares,
+            'total_amount': total_amount,
+            'avg_price': total_amount / total_shares if total_shares > 0 else 0,
+            'reason': reason,
+            'is_batch': True
         }
         
-        # 計算預期損益
-        avg_cost = float(user_holding['平均成本'])
-        expected_profit = (sell_data['price'] - avg_cost) * sell_data['shares']
-        profit_percentage = ((sell_data['price'] - avg_cost) / avg_cost * 100) if avg_cost > 0 else 0
-        
-        # 產生回應訊息
-        response = f"""📊 賣出投票已發起！
-
-🎯 投票ID：{vote_id}
-👤 發起人：{user_name}
-🏢 股票：{sell_data['stock_name']} ({sell_data['stock_code']})
-📉 賣出數量：{format_shares(sell_data['shares'])}
-💰 賣出價格：{sell_data['price']:.2f}元
-📈 平均成本：{avg_cost:.2f}元
-💵 預期損益：{expected_profit:+,.0f}元 ({profit_percentage:+.2f}%)
-⏰ 投票截止：{deadline.strftime('%Y-%m-%d %H:%M')}
-
-📝 投票方式：
-• 贊成請輸入：/贊成 {vote_id}
-• 反對請輸入：/反對 {vote_id}
-• 查看狀態：/投票狀態 {vote_id}
-
-⚠️ 需要超過半數群組成員贊成才能執行賣出"""
-        
-        if sell_data.get('note'):
-            response += f"\n\n💭 備註：{sell_data['note']}"
-        
-        return response
-        
     except Exception as e:
-        print(f"❌ 創建投票錯誤: {e}")
-        return f"❌ 創建賣出投票時發生錯誤: {str(e)}"
+        print(f"解析批次買入錯誤: {e}")
+        import traceback
+        print(traceback.format_exc())
+        return None
 
-def handle_vote(user_id, user_name, group_id, vote_id, vote_type):
-    """處理投票（贊成/反對）"""
+def parse_batch_sell_command(text):
+    """
+    解析批次賣出指令，支援多個價格（簡化版，不需要@）
+    格式: /賣出 台積電 2張 600元 3張 605元 獲利了結
+    """
     try:
-        # 從記憶體查找投票（實際應用應該從資料庫查詢）
-        if vote_id not in active_votes:
-            # 嘗試從 Google Sheets 恢復投票資訊
-            if not restore_vote_from_sheet(vote_id):
-                return f"❌ 找不到投票ID：{vote_id}"
+        text = text[3:].strip()
+        parts = text.split(maxsplit=1)
         
-        vote = active_votes[vote_id]
+        if len(parts) < 2:
+            return None
         
-        # 檢查投票是否已結束
-        if vote['status'] != 'active':
-            return f"❌ 此投票已結束（狀態：{vote['status']}）"
+        stock_input = parts[0]
+        remaining = parts[1]
         
-        # 檢查是否超過期限
-        if datetime.now() > vote['deadline']:
-            vote['status'] = 'expired'
-            update_vote_status(vote_id, '已過期')
-            return "❌ 此投票已過期"
+        # 匹配: 數字+張/股 數字+元
+        pattern = r'(\d+(?:\.\d+)?)\s*(張|股)?\s+(\d+(?:\.\d+)?)\s*元'
+        matches = re.findall(pattern, remaining)
         
-        # 檢查是否為同一群組
-        if group_id != vote['group_id']:
-            return "❌ 您不在此投票的群組中"
-        
-        # 處理投票
-        if vote_type == 'yes':
-            # 從反對票中移除（如果有）
-            vote['no_votes'].discard(user_id)
-            # 加入贊成票
-            vote['yes_votes'].add(user_id)
-            action = "贊成"
-        else:
-            # 從贊成票中移除（如果有）
-            vote['yes_votes'].discard(user_id)
-            # 加入反對票
-            vote['no_votes'].add(user_id)
-            action = "反對"
-        
-        # 更新 Google Sheets
-        update_vote_count(vote_id, len(vote['yes_votes']), len(vote['no_votes']))
-        
-        # 檢查是否需要執行賣出（簡單多數決）
-        total_votes = len(vote['yes_votes']) + len(vote['no_votes'])
-        
-        response = f"""✅ 您已投下「{action}」票！
-
-📊 目前投票狀況：
-• 贊成：{len(vote['yes_votes'])}票
-• 反對：{len(vote['no_votes'])}票
-• 總票數：{total_votes}票"""
-        
-        # 檢查是否達到執行條件（這裡設定為至少3人投票且贊成過半）
-        if total_votes >= 3 and len(vote['yes_votes']) > len(vote['no_votes']):
-            # 執行賣出
-            result = execute_sell(vote)
-            response += f"\n\n{result}"
-        elif total_votes >= 5 and len(vote['no_votes']) > len(vote['yes_votes']):
-            # 否決
-            vote['status'] = 'rejected'
-            update_vote_status(vote_id, '已否決')
-            response += "\n\n❌ 投票已否決，不執行賣出"
-        
-        return response
-        
-    except Exception as e:
-        print(f"❌ 處理投票錯誤: {e}")
-        return f"❌ 處理投票時發生錯誤: {str(e)}"
-
-def execute_sell(vote):
-    """執行賣出交易"""
-    try:
-        # 標記投票為已執行
-        vote['status'] = 'executed'
-        vote_id = None
-        for vid, v in active_votes.items():
-            if v == vote:
-                vote_id = vid
-                break
-        
-        # 記錄賣出交易
-        total_amount = vote['shares'] * vote['price']
-        profit = (vote['price'] - vote['avg_cost']) * vote['shares']
-        record_id = str(int(datetime.now().timestamp()))
-        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        # 記錄到交易紀錄
-        if transaction_sheet:
-            row_data = [
-                current_time,
-                vote['initiator_id'],
-                vote['initiator_name'],
-                vote['stock_code'],
-                vote['stock_name'],
-                '賣出',
-                vote['shares'],
-                vote['price'],
-                total_amount,
-                f"投票通過 (贊成:{len(vote['yes_votes'])} 反對:{len(vote['no_votes'])})",
-                vote['group_id'],
-                record_id,
-                vote_id,
-                '已執行',
-                f"實現損益: {profit:+,.0f}元"
-            ]
-            transaction_sheet.append_row(row_data)
-        
-        # 更新持股統計
-        update_holdings(
-            vote['initiator_id'],
-            vote['initiator_name'],
-            vote['group_id'],
-            vote['stock_code'],
-            vote['stock_name'],
-            vote['shares'],
-            vote['price'],
-            'sell'
-        )
-        
-        # 更新投票狀態
-        if vote_id:
-            update_vote_status(vote_id, '已執行')
-        
-        return f"""🎉 賣出交易已執行！
-
-📉 賣出：{vote['stock_name']} {format_shares(vote['shares'])}
-💰 成交價：{vote['price']:.2f}元
-💵 成交金額：{total_amount:,.0f}元
-📊 實現損益：{profit:+,.0f}元
-
-✅ 交易已記錄至 Google Sheets"""
-        
-    except Exception as e:
-        print(f"❌ 執行賣出錯誤: {e}")
-        return f"❌ 執行賣出時發生錯誤: {str(e)}"
-
-def get_vote_status(vote_id):
-    """查詢投票狀態"""
-    try:
-        # 從記憶體查找
-        if vote_id not in active_votes:
-            # 嘗試從 Google Sheets 恢復
-            if not restore_vote_from_sheet(vote_id):
-                return f"❌ 找不到投票ID：{vote_id}"
-        
-        vote = active_votes[vote_id]
-        
-        # 計算時間
-        time_left = vote['deadline'] - datetime.now()
-        hours_left = int(time_left.total_seconds() / 3600)
-        minutes_left = int((time_left.total_seconds() % 3600) / 60)
-        
-        status_text = f"""📊 投票狀態查詢
-
-🎯 投票ID：{vote_id}
-👤 發起人：{vote['initiator_name']}
-🏢 股票：{vote['stock_name']} ({vote['stock_code']})
-📉 賣出數量：{format_shares(vote['shares'])}
-💰 賣出價格：{vote['price']:.2f}元
-
-📈 投票進度：
-• 贊成：{len(vote['yes_votes'])}票
-• 反對：{len(vote['no_votes'])}票
-• 狀態：{vote['status']}"""
-        
-        if vote['status'] == 'active':
-            if hours_left > 0:
-                status_text += f"\n⏰ 剩餘時間：{hours_left}小時{minutes_left}分鐘"
-            else:
-                status_text += f"\n⏰ 剩餘時間：{minutes_left}分鐘"
-        
-        return status_text
-        
-    except Exception as e:
-        print(f"❌ 查詢投票狀態錯誤: {e}")
-        return f"❌ 查詢投票狀態時發生錯誤: {str(e)}"
-
-def restore_vote_from_sheet(vote_id):
-    """從 Google Sheets 恢復投票資訊"""
-    try:
-        if not voting_sheet:
-            return False
-        
-        records = voting_sheet.get_all_records()
-        for record in records:
-            if record['投票ID'] == vote_id and record['投票狀態'] == '進行中':
-                deadline = datetime.strptime(record['截止時間'], '%Y-%m-%d %H:%M:%S')
-                
-                # 恢復到記憶體
-                active_votes[vote_id] = {
-                    'initiator_id': record['發起人ID'],
-                    'initiator_name': record['發起人名稱'],
-                    'group_id': record['群組ID'],
-                    'stock_code': record['股票代號'],
-                    'stock_name': record['股票名稱'],
-                    'shares': int(record['賣出股數']),
-                    'price': float(record['賣出價格']),
-                    'deadline': deadline,
-                    'yes_votes': set(),  # 這裡無法恢復投票者，需要另外儲存
-                    'no_votes': set(),
-                    'status': 'active',
-                    'avg_cost': 0,  # 需要從持股表查詢
-                    'note': record.get('備註', '')
-                }
-                return True
-        
-        return False
-        
-    except Exception as e:
-        print(f"恢復投票資訊錯誤: {e}")
-        return False
-
-def update_vote_count(vote_id, yes_count, no_count):
-    """更新 Google Sheets 中的投票數"""
-    try:
-        if not voting_sheet:
-            return
-        
-        records = voting_sheet.get_all_records()
-        for i, record in enumerate(records, 2):
-            if record['投票ID'] == vote_id:
-                voting_sheet.update(f'J{i}:K{i}', [[yes_count, no_count]])
-                break
-                
-    except Exception as e:
-        print(f"更新投票數錯誤: {e}")
-
-def update_vote_status(vote_id, status):
-    """更新投票狀態"""
-    try:
-        if not voting_sheet:
-            return
-        
-        records = voting_sheet.get_all_records()
-        for i, record in enumerate(records, 2):
-            if record['投票ID'] == vote_id:
-                voting_sheet.update(f'I{i}', status)
-                if status in ['已執行', '已否決', '已過期']:
-                    voting_sheet.update(f'N{i}', status)
-                break
-                
-    except Exception as e:
-        print(f"更新投票狀態錯誤: {e}")
-
-def list_active_votes(group_id):
-    """列出群組中所有進行中的投票"""
-    try:
-        if not voting_sheet:
-            return "❌ 無法連接投票資料庫"
-        
-        records = voting_sheet.get_all_records()
-        active_list = []
-        
-        for record in records:
-            if record['群組ID'] == group_id and record['投票狀態'] == '進行中':
-                deadline = datetime.strptime(record['截止時間'], '%Y-%m-%d %H:%M:%S')
-                if deadline > datetime.now():
-                    active_list.append({
-                        'id': record['投票ID'],
-                        'stock': record['股票名稱'],
-                        'shares': format_shares(int(record['賣出股數'])),
-                        'price': float(record['賣出價格']),
-                        'yes': int(record['贊成票數'] or 0),
-                        'no': int(record['反對票數'] or 0),
-                        'deadline': deadline
-                    })
-        
-        if not active_list:
-            return "📊 目前沒有進行中的投票"
-        
-        response = "📊 進行中的投票：\n\n"
-        for vote in active_list:
-            time_left = vote['deadline'] - datetime.now()
-            hours_left = int(time_left.total_seconds() / 3600)
+        if not matches:
+            # 單一價格格式
+            single_pattern = r'^(.+?)\s+(\d+(?:\.\d+)?)\s*元(?:\s+(.+))?$'
+            single_match = re.match(single_pattern, remaining)
             
-            response += f"""🎯 ID: {vote['id']}
-• {vote['stock']} {vote['shares']} @ {vote['price']:.2f}元
-• 贊成:{vote['yes']} 反對:{vote['no']}
-• 剩餘:{hours_left}小時
-{'='*20}\n"""
+            if single_match:
+                shares_text = single_match.group(1).strip()
+                price = float(single_match.group(2))
+                note = single_match.group(3).strip() if single_match.group(3) else ''
+                
+                shares = parse_shares(shares_text)
+                if shares > 0:
+                    stock_code, stock_name = get_stock_code(stock_input)
+                    return {
+                        'stock_code': stock_code,
+                        'stock_name': stock_name,
+                        'shares': shares,
+                        'price': price,
+                        'note': note,
+                        'is_batch': False
+                    }
+            return None
         
-        response += "\n💡 投票指令：/贊成 [ID] 或 /反對 [ID]"
+        # 找備註
+        last_match = matches[-1]
+        last_pattern = f"{last_match[0]}\\s*{last_match[1] if last_match[1] else ''}\\s+{last_match[2]}\\s*元"
         
-        return response
+        last_match_obj = None
+        for match_obj in re.finditer(last_pattern, remaining):
+            last_match_obj = match_obj
+        
+        if last_match_obj:
+            note_start = last_match_obj.end()
+            note = remaining[note_start:].strip() if note_start < len(remaining) else ""
+        else:
+            note = ""
+        
+        stock_code, stock_name = get_stock_code(stock_input)
+        transactions = []
+        total_shares = 0
+        total_amount = 0
+        
+        for match in matches:
+            quantity = float(match[0])
+            unit = match[1] if match[1] else ''
+            price = float(match[2])
+            
+            if unit == '股':
+                shares = int(quantity)
+            elif unit == '張':
+                shares = int(quantity * 1000)
+            else:
+                if quantity >= 1000:
+                    shares = int(quantity)
+                else:
+                    shares = int(quantity * 1000)
+            
+            amount = shares * price
+            total_shares += shares
+            total_amount += amount
+            
+            transactions.append({
+                'shares': shares,
+                'price': price,
+                'amount': amount
+            })
+        
+        return {
+            'stock_code': stock_code,
+            'stock_name': stock_name,
+            'transactions': transactions,
+            'total_shares': total_shares,
+            'total_amount': total_amount,
+            'avg_price': total_amount / total_shares if total_shares > 0 else 0,
+            'note': note,
+            'is_batch': True
+        }
         
     except Exception as e:
-        print(f"列出投票錯誤: {e}")
-        return f"❌ 列出投票時發生錯誤: {str(e)}"
+        print(f"解析批次賣出錯誤: {e}")
+        import traceback
+        print(traceback.format_exc())
+        return None
 
-# 在 webhook 函數中加入以下處理邏輯：
+def handle_buy_command_unified(user_id, user_name, group_id, message_text):
+    """統一處理買入指令（支援單筆和批次）"""
+    buy_data = parse_batch_buy_command(message_text)
+    
+    if not buy_data:
+        return """❌ 買入指令格式錯誤
 
-def handle_sell_command(message_text, user_id, user_name, group_id):
-    """處理賣出相關指令"""
-    
-    # 賣出投票
-    if message_text.startswith('/賣出'):
-        sell_data = parse_sell_command(message_text)
-        if sell_data:
-            return create_sell_voting(user_id, user_name, group_id, sell_data)
-        else:
-            return """❌ 賣出指令格式錯誤
+✅ 支援的格式：
 
-正確格式：/賣出 股票名稱 數量 價格 [備註]
+【單筆買入】
+/買入 台積電 5張 580元 看好AI趨勢
+/買入 2330 500股 580元 技術突破
 
-範例：
-• /賣出 台積電 2張 600元
-• /賣出 2330 1000股 600元 獲利了結
-• /賣出 聯發科 3張 1300元 達到目標價"""
+【批次買入】
+/買入 台積電 2張 580元 3張 575元 看好AI趨勢
+/買入 2330 1000股 580元 500股 575元 逢低布局
+
+💡 提示：
+• 數量可用「張」或「股」
+• 只寫數字時，小於1000視為張數
+• 支援多個不同價格的買入"""
     
-    # 贊成投票
-    elif message_text.startswith('/贊成'):
-        parts = message_text.split()
-        if len(parts) == 2:
-            vote_id = parts[1]
-            return handle_vote(user_id, user_name, group_id, vote_id, 'yes')
+    # 根據是否為批次交易來處理
+    if buy_data.get('is_batch') and len(buy_data.get('transactions', [])) > 1:
+        return handle_batch_buy_stock(user_id, user_name, group_id, buy_data)
+    else:
+        # 單筆交易使用原有函數
+        return handle_buy_stock(user_id, user_name, group_id, buy_data)
+
+def handle_sell_command_unified(user_id, user_name, group_id, message_text):
+    """統一處理賣出指令（支援單筆和批次）"""
+    sell_data = parse_batch_sell_command(message_text)
+    
+    if not sell_data:
+        return """❌ 賣出指令格式錯誤
+
+✅ 支援的格式：
+
+【單筆賣出】
+/賣出 台積電 2張 600元
+/賣出 2330 1000股 600元 獲利了結
+
+【批次賣出】
+/賣出 台積電 1張 600元 2張 605元
+/賣出 2330 500股 600元 500股 605元 分批獲利
+
+💡 提示：
+• 賣出會發起群組投票
+• 超過50%成員贊成即執行
+• 投票有效期24小時"""
+    
+    # 創建賣出投票（支援批次價格）
+    return create_sell_voting_with_member_count(user_id, user_name, group_id, sell_data)
+
+# 測試函數
+def test_parsing():
+    """測試解析功能"""
+    test_cases = [
+        # 單筆買入
+        "/買入 台積電 5張 580元 看好AI趨勢",
+        "/買入 2330 500股 580元 技術突破",
+        "/買入 台積電 5 580元 測試",
+        
+        # 批次買入
+        "/買入 台積電 2張 580元 3張 575元 看好AI趨勢",
+        "/買入 2330 1000股 580元 500股 575元 逢低布局",
+        "/買入 聯發科 1 1200元 2 1195元 3 1190元 分批建倉",
+        
+        # 單筆賣出
+        "/賣出 台積電 2張 600元",
+        "/賣出 2330 1000股 600元 獲利了結",
+        
+        # 批次賣出
+        "/賣出 台積電 1張 600元 2張 605元",
+        "/賣出 2330 500股 600元 500股 605元 分批獲利",
+        "/賣出 聯發科 1 1300元 1 1305元 1 1310元 逐步出場"
+    ]
+    
+    print("=" * 50)
+    print("測試買賣指令解析")
+    print("=" * 50)
+    
+    for test in test_cases:
+        print(f"\n測試: {test}")
+        
+        if test.startswith("/買入"):
+            result = parse_batch_buy_command(test)
+            if result:
+                print(f"✅ 解析成功")
+                print(f"  股票: {result['stock_name']} ({result['stock_code']})")
+                if result.get('is_batch'):
+                    print(f"  批次交易:")
+                    for i, trans in enumerate(result['transactions'], 1):
+                        print(f"    {i}. {format_shares(trans['shares'])} @ {trans['price']}元 = {trans['amount']:,.0f}元")
+                    print(f"  平均價: {result['avg_price']:.2f}元")
+                else:
+                    print(f"  單筆: {format_shares(result['shares'])} @ {result['price']}元")
+                print(f"  理由: {result.get('reason', '')}")
+            else:
+                print("❌ 解析失敗")
+                
+        elif test.startswith("/賣出"):
+            result = parse_batch_sell_command(test)
+            if result:
+                print(f"✅ 解析成功")
+                print(f"  股票: {result['stock_name']} ({result['stock_code']})")
+                if result.get('is_batch'):
+                    print(f"  批次交易:")
+                    for i, trans in enumerate(result['transactions'], 1):
+                        print(f"    {i}. {format_shares(trans['shares'])} @ {trans['price']}元 = {trans['amount']:,.0f}元")
+                    print(f"  平均價: {result['avg_price']:.2f}元")
+                else:
+                    print(f"  單筆: {format_shares(result['shares'])} @ {result['price']}元")
+                print(f"  備註: {result.get('note', '')}")
+            else:
+                print("❌ 解析失敗")
+
+# 輔助函數（需要從主程式引入）
+def format_shares(shares):
+    """格式化股數顯示"""
+    if shares >= 1000:
+        zhang = shares // 1000
+        remaining = shares % 1000
+        if remaining > 0:
+            return f"{zhang}張{remaining}股"
         else:
-            return "❌ 格式錯誤\n正確格式：/贊成 投票ID"
+            return f"{zhang}張"
+    else:
+        return f"{shares}股"
+
+def parse_shares(shares_text):
+    """解析股數，支援張和股"""
+    shares_text = shares_text.strip()
     
-    # 反對投票
-    elif message_text.startswith('/反對'):
-        parts = message_text.split()
-        if len(parts) == 2:
-            vote_id = parts[1]
-            return handle_vote(user_id, user_name, group_id, vote_id, 'no')
+    if '張' in shares_text:
+        match = re.search(r'(\d+(?:\.\d+)?)張', shares_text)
+        if match:
+            zhang = float(match.group(1))
+            return int(zhang * 1000)
+    
+    if '股' in shares_text:
+        match = re.search(r'(\d+)股', shares_text)
+        if match:
+            return int(match.group(1))
+    
+    # 只有數字
+    match = re.search(r'(\d+(?:\.\d+)?)', shares_text)
+    if match:
+        num = float(match.group(1))
+        if num >= 1000:
+            return int(num)
         else:
-            return "❌ 格式錯誤\n正確格式：/反對 投票ID"
+            return int(num * 1000)
     
-    # 查詢投票狀態
-    elif message_text.startswith('/投票狀態'):
-        parts = message_text.split()
-        if len(parts) == 2:
-            vote_id = parts[1]
-            return get_vote_status(vote_id)
-        else:
-            return "❌ 格式錯誤\n正確格式：/投票狀態 投票ID"
+    return 0
+
+def get_stock_code(input_text):
+    """取得股票代號（示例函數，實際需要從主程式引入）"""
+    # 這裡需要實際的股票代號對應表
+    STOCK_CODES = {
+        '2330': '台積電',
+        '2454': '聯發科',
+        '2317': '鴻海',
+    }
+    STOCK_NAMES = {v: k for k, v in STOCK_CODES.items()}
     
-    # 列出所有投票
-    elif message_text == '/投票' or message_text == '/投票清單':
-        return list_active_votes(group_id)
+    input_text = input_text.strip()
     
-    return None
+    if input_text in STOCK_CODES:
+        return input_text, STOCK_CODES[input_text]
+    
+    if input_text in STOCK_NAMES:
+        return STOCK_NAMES[input_text], input_text
+    
+    return '', input_text
+
+# 如果直接執行此檔案，運行測試
+if __name__ == "__main__":
+    test_parsing()
