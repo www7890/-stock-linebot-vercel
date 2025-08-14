@@ -30,11 +30,10 @@ voting_sheet = None
 active_votes = {}
 user_daily_votes = {}
 
-# 股票清單快取（動態爬取後儲存）
-STOCK_CODES = {}
-STOCK_NAMES = {}
-STOCK_CACHE_TIME = None
-CACHE_DURATION = 3600  # 快取1小時
+# 股票快取（查詢過的股票會存在這裡）
+STOCK_CACHE = {}
+CACHE_TIME = {}
+CACHE_DURATION = 86400  # 快取24小時
 
 def init_google_sheets():
     global transaction_sheet, holdings_sheet, voting_sheet
@@ -78,269 +77,25 @@ def init_google_sheets():
         print(f"❌ Google Sheets 初始化失敗: {e}")
         return False
 
-def get_fallback_stock_list():
-    """備用股票清單（基本的熱門股票）"""
-    return {
-        # 熱門上市股票
-        '2330': '台積電',
-        '2454': '聯發科',
-        '2317': '鴻海',
-        '2412': '中華電',
-        '2882': '國泰金',
-        '2881': '富邦金',
-        '2886': '兆豐金',
-        '2891': '中信金',
-        '2308': '台達電',
-        '2303': '聯電',
-        '2603': '長榮',
-        '2609': '陽明',
-        '2615': '萬海',
-        '3008': '大立光',
-        '2002': '中鋼',
-        '2357': '華碩',
-        '2382': '廣達',
-        '1301': '台塑',
-        '1303': '南亞',
-        '2884': '玉山金',
-        '2885': '元大金',
-        '2892': '第一金',
-        '6505': '台塑化',
-        '2207': '和泰車',
-        '2395': '研華',
-        '3711': '日月光投控',
-        '2379': '瑞昱',
-        '2327': '國巨',
-        '2345': '智邦',
-        '2377': '微星',
-        '1216': '統一',
-        '1229': '聯華',
-        '2912': '統一超',
-        '9910': '豐泰',
-        '2887': '台新金',
-        '2890': '永豐金',
-        
-        # 熱門上櫃股票
-        '3078': '波若威',
-        '6547': '高端疫苗',
-        '3105': '穩懋',
-        '5274': '信驊',
-        '3661': '世芯-KY',
-        '6488': '環球晶',
-        '8299': '群聯',
-        '3293': '鈊象',
-        '5483': '中美晶',
-        '3260': '威剛',
-        '6121': '新普',
-        '6147': '頎邦',
-        '8086': '宏捷科',
-        '4966': '譜瑞-KY',
-        '3227': '原相',
-        '3707': '漢磊',
-        '5269': '祥碩',
-        '3529': '力旺',
-        '6104': '創惟',
-        '3680': '家登',
-        '5347': '世界',
-        '3324': '雙鴻',
-        '6510': '精測',
-        '3141': '晶宏',
-        '6732': 'M31',
-        '3217': '優群',
-        '4743': '合一',
-        '4174': '浩鼎',
-        '1565': '精華',
-        '4123': '晟德',
-        '6469': '大樹'
-    }
+# 初始化 Google Sheets
+init_google_sheets()
 
-def init_stock_list():
-    """初始化股票清單"""
-    global STOCK_CODES, STOCK_NAMES
-    # 先使用基本清單，確保程式可以運作
-    STOCK_CODES = get_fallback_stock_list()
-    STOCK_NAMES = {v: k for k, v in STOCK_CODES.items()}
-    print(f"初始化基本股票清單: {len(STOCK_CODES)} 支")
-    # 背景嘗試載入完整清單
-    try:
-        fetch_stock_list()
-    except Exception as e:
-        print(f"背景載入股票清單失敗: {e}")
-
-def fetch_stock_list():
-    """動態爬取所有上市櫃股票清單"""
-    global STOCK_CODES, STOCK_NAMES, STOCK_CACHE_TIME
-    
-    # 檢查快取是否有效
-    if STOCK_CACHE_TIME and STOCK_CODES:
-        if time.time() - STOCK_CACHE_TIME < CACHE_DURATION:
-            print(f"使用快取的股票清單，共 {len(STOCK_CODES)} 支股票")
-            return True
-    
-    print("開始動態爬取股票清單...")
-    temp_codes = {}
-    
+def search_stock_realtime(keyword):
+    """即時搜尋股票（從證交所API）"""
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
         
-        # 方法1: 使用更可靠的 API endpoint
-        try:
-            # 取得所有上市股票
-            print("爬取上市股票...")
-            tse_url = "https://www.twse.com.tw/rwd/zh/api/codeQuery?query="
-            response = requests.get(tse_url, headers=headers, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                if 'suggestions' in data:
-                    for item in data['suggestions']:
-                        # 格式: "2330\t台積電"
-                        if '\t' in item:
-                            parts = item.split('\t')
-                            if len(parts) >= 2:
-                                code = parts[0].strip()
-                                name = parts[1].strip().split('(')[0].strip()  # 移除括號內容
-                                if code and name and code[0].isdigit():
-                                    temp_codes[code] = name
-            
-            # 取得所有上櫃股票
-            print("爬取上櫃股票...")
-            otc_url = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&se=AL"
-            response = requests.get(otc_url, headers=headers, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                if 'aaData' in data:
-                    for item in data['aaData']:
-                        if len(item) >= 2:
-                            code = str(item[0]).strip()
-                            name = str(item[1]).strip()
-                            if code and name and code[0].isdigit():
-                                temp_codes[code] = name
-                                
-        except Exception as e:
-            print(f"方法1失敗: {e}")
+        print(f"即時搜尋股票: {keyword}")
         
-        # 方法2: 備用爬取方式
-        if len(temp_codes) < 100:
-            print("使用備用爬取方式...")
-            try:
-                # 從證交所網站取得股票清單
-                import re
-                
-                # 上市股票
-                url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
-                response = requests.get(url, headers=headers, timeout=10)
-                if response.status_code == 200:
-                    response.encoding = 'big5'
-                    html = response.text
-                    # 簡單的正則表達式解析
-                    pattern = r'<td.*?>(\d{4,6})\s+([\u4e00-\u9fa5\w\-]+)</td>'
-                    matches = re.findall(pattern, html)
-                    for code, name in matches:
-                        if code and name and code[0].isdigit():
-                            temp_codes[code] = name.strip()
-                
-                # 上櫃股票
-                url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
-                response = requests.get(url, headers=headers, timeout=10)
-                if response.status_code == 200:
-                    response.encoding = 'big5'
-                    html = response.text
-                    pattern = r'<td.*?>(\d{4,6})\s+([\u4e00-\u9fa5\w\-]+)</td>'
-                    matches = re.findall(pattern, html)
-                    for code, name in matches:
-                        if code and name and code[0].isdigit():
-                            temp_codes[code] = name.strip()
-                            
-            except Exception as e:
-                print(f"方法2失敗: {e}")
-        
-        # 如果爬取失敗或數量太少，使用備用清單
-        if len(temp_codes) < 50:
-            print("爬取數量不足，使用備用清單...")
-            temp_codes = get_fallback_stock_list()
-        
-        # 更新全域變數
-        if temp_codes:
-            STOCK_CODES = temp_codes
-            STOCK_NAMES = {v: k for k, v in STOCK_CODES.items()}
-            STOCK_CACHE_TIME = time.time()
-            print(f"✅ 成功載入 {len(STOCK_CODES)} 支股票")
-            
-            # 儲存到 Google Sheets 作為備份（選擇性）
-            try:
-                save_stock_list_to_sheets(STOCK_CODES)
-            except:
-                pass
-                
-            return True
-        else:
-            print("❌ 無法取得股票清單，使用基本清單")
-            STOCK_CODES = get_fallback_stock_list()
-            STOCK_NAMES = {v: k for k, v in STOCK_CODES.items()}
-            return False
-            
-    except Exception as e:
-        print(f"爬取股票清單錯誤: {e}")
-        import traceback
-        print(traceback.format_exc())
-        # 發生錯誤時使用備用清單
-        STOCK_CODES = get_fallback_stock_list()
-        STOCK_NAMES = {v: k for k, v in STOCK_CODES.items()}
-        return False
-
-def save_stock_list_to_sheets(stock_dict):
-    """將股票清單儲存到 Google Sheets（選擇性功能）"""
-    try:
-        if not GOOGLE_CREDENTIALS_JSON or not SPREADSHEET_ID:
-            return
-        
-        import gspread
-        credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
-        gc = gspread.service_account_from_dict(credentials_info)
-        spreadsheet = gc.open_by_key(SPREADSHEET_ID)
-        
-        # 嘗試取得或創建股票清單工作表
-        try:
-            stock_list_sheet = spreadsheet.worksheet('股票清單')
-            stock_list_sheet.clear()
-        except:
-            stock_list_sheet = spreadsheet.add_worksheet(title='股票清單', rows=5000, cols=3)
-        
-        # 準備資料
-        headers = [['股票代號', '股票名稱', '更新時間']]
-        data = []
-        update_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        for code, name in sorted(stock_dict.items()):
-            data.append([code, name, update_time])
-        
-        # 寫入資料
-        if data:
-            stock_list_sheet.update('A1:C1', headers)
-            stock_list_sheet.update(f'A2:C{len(data)+1}', data)
-            print(f"✅ 股票清單已儲存到 Google Sheets")
-            
-    except Exception as e:
-        print(f"儲存股票清單到 Sheets 失敗: {e}")
-
-def search_stock_from_web(keyword):
-    """從網路即時搜尋股票代號和名稱"""
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        print(f"開始網路搜尋: {keyword}")
-        
-        # 使用證交所的搜尋 API
-        search_url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
-        
-        # 如果是數字，可能是股票代號
-        if keyword.isdigit():
-            # 嘗試上市股票
+        # 如果是4位數字，當作股票代號
+        if keyword.isdigit() and len(keyword) == 4:
+            # 嘗試上市
+            url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
             params = {'ex_ch': f'tse_{keyword}.tw', 'json': '1', 'delay': '0'}
-            response = requests.get(search_url, params=params, headers=headers, timeout=5)
+            
+            response = requests.get(url, params=params, headers=headers, timeout=5)
             if response.status_code == 200:
                 data = response.json()
                 if 'msgArray' in data and len(data['msgArray']) > 0:
@@ -349,11 +104,11 @@ def search_stock_from_web(keyword):
                         code = stock_data['c']
                         name = stock_data['n']
                         print(f"找到上市股票: {code} {name}")
-                        return code, name
+                        return code, name, 'tse'
             
-            # 嘗試上櫃股票
-            params = {'ex_ch': f'otc_{keyword}.tw', 'json': '1', 'delay': '0'}
-            response = requests.get(search_url, params=params, headers=headers, timeout=5)
+            # 嘗試上櫃
+            params['ex_ch'] = f'otc_{keyword}.tw'
+            response = requests.get(url, params=params, headers=headers, timeout=5)
             if response.status_code == 200:
                 data = response.json()
                 if 'msgArray' in data and len(data['msgArray']) > 0:
@@ -362,61 +117,91 @@ def search_stock_from_web(keyword):
                         code = stock_data['c']
                         name = stock_data['n']
                         print(f"找到上櫃股票: {code} {name}")
-                        return code, name
+                        return code, name, 'otc'
         
-        print(f"網路搜尋無結果: {keyword}")
-        return None, keyword
+        # 如果是中文名稱，嘗試從常用股票對照
+        # 這裡使用簡單的對照表，實際使用時可以從證交所爬取完整清單
+        common_stocks = {
+            '台積電': '2330', '聯發科': '2454', '鴻海': '2317', 
+            '台達電': '2308', '聯電': '2303', '中華電': '2412',
+            '國泰金': '2882', '富邦金': '2881', '兆豐金': '2886',
+            '中信金': '2891', '玉山金': '2884', '元大金': '2885',
+            '長榮': '2603', '陽明': '2609', '萬海': '2615',
+            '華碩': '2357', '廣達': '2382', '大立光': '3008',
+            '台塑': '1301', '南亞': '1303', '中鋼': '2002',
+            '統一': '1216', '統一超': '2912', '台泥': '1101',
+            '亞泥': '1102', '遠東新': '1402', '中石化': '1314',
+            '台化': '1326', '台玻': '1802', '正新': '2105',
+            '和碩': '4938', '緯創': '3231', '仁寶': '2324',
+            '光寶科': '2301', '緯穎': '6669', '台光電': '2383',
+            '欣興': '3037', '景碩': '3189', '南電': '8046',
+            '臻鼎': '4958', '健鼎': '3044', '華通': '2313',
+            # 上櫃股票
+            '波若威': '3078', '高端疫苗': '6547', '穩懋': '3105',
+            '信驊': '5274', '世芯': '3661', '環球晶': '6488',
+            '群聯': '8299', '鈊象': '3293', '中美晶': '5483',
+            '威剛': '3260', '原相': '3227', '祥碩': '5269',
+            '力旺': '3529', '創惟': '6104', '精測': '6510',
+            '譜瑞': '4966', '台燿': '6274', '合一': '4743'
+        }
+        
+        # 檢查常用股票名稱
+        if keyword in common_stocks:
+            code = common_stocks[keyword]
+            # 驗證並取得完整資訊
+            return search_stock_realtime(code)
+        
+        # 部分匹配
+        for name, code in common_stocks.items():
+            if keyword in name or name in keyword:
+                print(f"部分匹配到: {name} -> {code}")
+                return search_stock_realtime(code)
+        
+        print(f"找不到股票: {keyword}")
+        return None, None, None
         
     except Exception as e:
         print(f"搜尋股票錯誤: {e}")
-        return None, keyword
+        return None, None, None
 
-# 初始化 Google Sheets
-init_google_sheets()
+def get_stock_info(keyword):
+    """取得股票資訊（代號、名稱、市場）"""
+    # 檢查快取
+    if keyword in STOCK_CACHE:
+        cache_time = CACHE_TIME.get(keyword, 0)
+        if time.time() - cache_time < CACHE_DURATION:
+            print(f"使用快取: {keyword}")
+            return STOCK_CACHE[keyword]
+    
+    # 即時搜尋
+    code, name, market = search_stock_realtime(keyword)
+    
+    if code and name:
+        # 加入快取
+        stock_info = {'code': code, 'name': name, 'market': market}
+        STOCK_CACHE[keyword] = stock_info
+        CACHE_TIME[keyword] = time.time()
+        
+        # 如果是用名稱查詢，也要快取代號
+        if keyword != code:
+            STOCK_CACHE[code] = stock_info
+            CACHE_TIME[code] = time.time()
+        
+        return stock_info
+    
+    return None
 
-# 初始化股票清單
-init_stock_list()
-
-def get_stock_code(input_text):
-    """取得股票代號，支援代號或名稱輸入（動態查詢）"""
-    input_text = input_text.strip()
-    
-    # 確保股票清單已載入
-    if not STOCK_CODES:
-        init_stock_list()
-    
-    # 先嘗試直接匹配代號
-    if input_text in STOCK_CODES:
-        return input_text, STOCK_CODES[input_text]
-    
-    # 再嘗試匹配名稱
-    if input_text in STOCK_NAMES:
-        return STOCK_NAMES[input_text], input_text
-    
-    # 嘗試部分匹配名稱
-    for name, code in STOCK_NAMES.items():
-        if input_text in name or name in input_text:
-            return code, name
-    
-    # 如果本地找不到，嘗試從網路搜尋
-    print(f"本地找不到 {input_text}，嘗試網路搜尋...")
-    code, name = search_stock_from_web(input_text)
-    
-    # 如果找到了，加入快取
-    if code and code != input_text:
-        STOCK_CODES[code] = name
-        STOCK_NAMES[name] = code
-        print(f"✅ 找到並快取: {code} {name}")
-        return code, name
-    
-    # 如果都找不到，返回原始輸入作為名稱，代號為空
-    return '', input_text
-
-def get_stock_price_yahoo(stock_code):
-    """使用 Yahoo Finance API 抓取股價（支援上市上櫃）"""
+def get_stock_price_yahoo(stock_code, market='tse'):
+    """使用 Yahoo Finance API 抓取股價"""
     try:
-        # 上市股票用 .TW，上櫃股票用 .TWO
-        suffixes = ['.TW', '.TWO']
+        # 根據市場決定後綴
+        suffix = '.TW' if market == 'tse' else '.TWO'
+        
+        # 如果不確定市場，兩個都試
+        if market not in ['tse', 'otc']:
+            suffixes = ['.TW', '.TWO']
+        else:
+            suffixes = [suffix]
         
         for suffix in suffixes:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{stock_code}{suffix}"
@@ -441,13 +226,19 @@ def get_stock_price_yahoo(stock_code):
         print(f"Yahoo Finance 錯誤 {stock_code}: {e}")
         return None
 
-def get_stock_price_twse(stock_code):
-    """使用 TWSE/TPEx API 抓取股價（支援上市上櫃）"""
+def get_stock_price_twse(stock_code, market='tse'):
+    """使用 TWSE/TPEx API 抓取股價"""
     try:
-        # 先嘗試上市（TWSE）
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+        
+        # 根據市場決定前綴
+        if market == 'otc':
+            prefix = 'otc_'
+        else:
+            prefix = 'tse_'
+        
         params = {
-            'ex_ch': f'tse_{stock_code}.tw',
+            'ex_ch': f'{prefix}{stock_code}.tw',
             'json': '1',
             'delay': '0'
         }
@@ -464,61 +255,40 @@ def get_stock_price_twse(stock_code):
             if 'msgArray' in data and len(data['msgArray']) > 0:
                 stock_data = data['msgArray'][0]
                 if 'z' in stock_data and stock_data['z'] != '-':
-                    print(f"✅ TWSE API 成功 (上市): {stock_data['z']}")
+                    print(f"✅ TWSE API 成功 ({market}): {stock_data['z']}")
                     return float(stock_data['z'])
                 elif 'y' in stock_data and stock_data['y'] != '-':
-                    print(f"✅ TWSE API 成功 (上市昨收): {stock_data['y']}")
+                    print(f"✅ TWSE API 成功 ({market}昨收): {stock_data['y']}")
                     return float(stock_data['y'])
         
-        # 再嘗試上櫃（TPEx）
-        params['ex_ch'] = f'otc_{stock_code}.tw'
-        response = requests.get(url, params=params, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            if 'msgArray' in data and len(data['msgArray']) > 0:
-                stock_data = data['msgArray'][0]
-                if 'z' in stock_data and stock_data['z'] != '-':
-                    print(f"✅ TPEx API 成功 (上櫃): {stock_data['z']}")
-                    return float(stock_data['z'])
-                elif 'y' in stock_data and stock_data['y'] != '-':
-                    print(f"✅ TPEx API 成功 (上櫃昨收): {stock_data['y']}")
-                    return float(stock_data['y'])
+        # 如果失敗，嘗試另一個市場
+        if market == 'tse':
+            return get_stock_price_twse(stock_code, 'otc')
         
         return None
     except Exception as e:
         print(f"TWSE/TPEx API 錯誤 {stock_code}: {e}")
         return None
 
-def get_stock_price(stock_code, stock_name):
-    """抓取股票即時價格（多重來源）"""
+def get_stock_price(stock_code, stock_name=None, market=None):
+    """取得股票價格（整合版）"""
     if not stock_code:
-        print(f"⚠️ 無股票代號：{stock_name}")
-        # 嘗試搜尋股票代號
-        code, name = search_stock_from_web(stock_name)
-        if code:
-            stock_code = code
-            stock_name = name
-            print(f"✅ 找到股票代號: {stock_code} {stock_name}")
-        else:
-            return 0
+        return 0
     
-    print(f"📊 開始抓取股價：{stock_code} {stock_name}")
+    print(f"📊 開始抓取股價：{stock_code} {stock_name if stock_name else ''} ({market if market else '未知市場'})")
     
     # 策略1: Yahoo Finance
-    price = get_stock_price_yahoo(stock_code)
+    price = get_stock_price_yahoo(stock_code, market if market else 'tse')
     if price and price > 0:
-        print(f"✅ Yahoo Finance 成功：{price}")
         return price
     
-    # 策略2: TWSE API
+    # 策略2: TWSE/TPEx API
     time.sleep(0.5)
-    price = get_stock_price_twse(stock_code)
+    price = get_stock_price_twse(stock_code, market if market else 'tse')
     if price and price > 0:
-        print(f"✅ TWSE API 成功：{price}")
         return price
     
-    print(f"❌ 無法取得股價: {stock_code} {stock_name}")
+    print(f"❌ 無法取得股價: {stock_code}")
     return 0
 
 def parse_shares(shares_text):
@@ -560,7 +330,7 @@ def format_shares(shares):
         return f"{shares}股"
 
 def parse_buy_command(text):
-    """解析買入指令（支援單筆和批次，不需要@）"""
+    """解析買入指令"""
     try:
         # 移除開頭的 /買入
         text = text[3:].strip()
@@ -572,6 +342,15 @@ def parse_buy_command(text):
         
         stock_input = parts[0]
         remaining = parts[1]
+        
+        # 取得股票資訊
+        stock_info = get_stock_info(stock_input)
+        if stock_info:
+            stock_code = stock_info['code']
+            stock_name = stock_info['name']
+        else:
+            stock_code = ''
+            stock_name = stock_input
         
         # 先嘗試批次模式：數量 價格 的配對（可能有多個）
         batch_pattern = r'(\d+(?:\.\d+)?)\s*(張|股)?\s+(\d+(?:\.\d+)?)\s*元'
@@ -593,8 +372,6 @@ def parse_buy_command(text):
             else:
                 reason = "批次買入"
             
-            # 處理每個價格區間
-            stock_code, stock_name = get_stock_code(stock_input)
             transactions = []
             total_shares = 0
             total_amount = 0
@@ -658,8 +435,6 @@ def parse_buy_command(text):
                 else:
                     shares = int(quantity)
             
-            stock_code, stock_name = get_stock_code(stock_input)
-            
             return {
                 'stock_code': stock_code,
                 'stock_name': stock_name,
@@ -688,8 +463,6 @@ def parse_buy_command(text):
                 else:
                     shares = int(quantity)
             
-            stock_code, stock_name = get_stock_code(stock_input)
-            
             return {
                 'stock_code': stock_code,
                 'stock_name': stock_name,
@@ -708,7 +481,7 @@ def parse_buy_command(text):
         return None
 
 def parse_sell_command(text):
-    """解析賣出指令（支援單筆和批次，不需要@）"""
+    """解析賣出指令"""
     try:
         text = text[3:].strip()
         parts = text.split(maxsplit=1)
@@ -718,6 +491,15 @@ def parse_sell_command(text):
         
         stock_input = parts[0]
         remaining = parts[1]
+        
+        # 取得股票資訊
+        stock_info = get_stock_info(stock_input)
+        if stock_info:
+            stock_code = stock_info['code']
+            stock_name = stock_info['name']
+        else:
+            stock_code = ''
+            stock_name = stock_input
         
         # 先嘗試批次模式：數量 價格 的配對（可能有多個）
         batch_pattern = r'(\d+(?:\.\d+)?)\s*(張|股)?\s+(\d+(?:\.\d+)?)\s*元'
@@ -739,7 +521,6 @@ def parse_sell_command(text):
             else:
                 note = ""
             
-            stock_code, stock_name = get_stock_code(stock_input)
             transactions = []
             total_shares = 0
             total_amount = 0
@@ -804,8 +585,6 @@ def parse_sell_command(text):
                 else:
                     shares = int(quantity)
             
-            stock_code, stock_name = get_stock_code(stock_input)
-            
             return {
                 'stock_code': stock_code,
                 'stock_name': stock_name,
@@ -813,8 +592,8 @@ def parse_sell_command(text):
                 'price': price,
                 'note': note,
                 'is_batch': False,
-                'total_shares': shares,  # 加入 total_shares
-                'avg_price': price  # 加入 avg_price
+                'total_shares': shares,
+                'avg_price': price
             }
         
         # 格式2: 2張 600元 (沒有備註)
@@ -836,8 +615,6 @@ def parse_sell_command(text):
                 else:
                     shares = int(quantity)
             
-            stock_code, stock_name = get_stock_code(stock_input)
-            
             return {
                 'stock_code': stock_code,
                 'stock_name': stock_name,
@@ -845,8 +622,8 @@ def parse_sell_command(text):
                 'price': price,
                 'note': '',
                 'is_batch': False,
-                'total_shares': shares,  # 加入 total_shares
-                'avg_price': price  # 加入 avg_price
+                'total_shares': shares,
+                'avg_price': price
             }
         
         return None
@@ -858,7 +635,7 @@ def parse_sell_command(text):
         return None
 
 def handle_buy_stock(user_id, user_name, group_id, buy_data):
-    """處理買入股票（修復版 - 加強錯誤處理）"""
+    """處理買入股票"""
     try:
         # 基本資料驗證
         if not buy_data:
@@ -953,7 +730,6 @@ def handle_buy_stock(user_id, user_name, group_id, buy_data):
         import traceback
         print(traceback.format_exc())
         
-        # 提供更友善的錯誤訊息
         return f"""❌ 處理買入時發生錯誤
 
 請檢查：
@@ -1037,7 +813,7 @@ def handle_batch_buy_stock(user_id, user_name, group_id, buy_data):
         return f"❌ 處理批次買入時發生錯誤: {str(e)}"
 
 def update_holdings(user_id, user_name, group_id, stock_code, stock_name, shares, price, action):
-    """更新持股統計（修復版）"""
+    """更新持股統計"""
     try:
         if not holdings_sheet:
             print("⚠️ holdings_sheet 不存在")
@@ -1053,10 +829,9 @@ def update_holdings(user_id, user_name, group_id, stock_code, stock_name, shares
         existing_row = None
         row_index = None
         
-        # 查找現有持股 - 更精確的比對
+        # 查找現有持股
         for i, record in enumerate(records, 2):
             try:
-                # 確保都轉為字串比較，避免型別問題
                 record_user_id = str(record.get('使用者ID', ''))
                 record_group_id = str(record.get('群組ID', ''))
                 record_stock_code = str(record.get('股票代號', ''))
@@ -1179,34 +954,36 @@ def get_user_holdings(user_id, group_id, specific_stock=None):
         records = holdings_sheet.get_all_records()
         
         # 判斷是否要查看他人持股
-        target_name = None
         if specific_stock:
             # 處理特殊關鍵字
             if specific_stock == '全部':
                 return get_all_group_holdings(group_id)
             
             # 檢查是否為用戶名稱（不是股票）
-            stock_code, stock_name = get_stock_code(specific_stock)
-            if not stock_code and specific_stock not in STOCK_CODES.values():
+            stock_info = get_stock_info(specific_stock)
+            if not stock_info:
                 # 可能是用戶名稱
-                target_name = specific_stock
-                return get_others_holdings(target_name, group_id)
+                return get_others_holdings(specific_stock, group_id)
         
         # 原本的個人持股查詢邏輯
         user_holdings = []
         for record in records:
             if record['使用者ID'] == user_id and record['群組ID'] == group_id:
-                if specific_stock and not target_name:
-                    stock_code, stock_name = get_stock_code(specific_stock)
-                    if (record['股票代號'] == stock_code or 
-                        record['股票名稱'] == stock_name or
-                        record['股票名稱'] == specific_stock):
+                if specific_stock:
+                    stock_info = get_stock_info(specific_stock)
+                    if stock_info:
+                        stock_code = stock_info['code']
+                        stock_name = stock_info['name']
+                        if (record['股票代號'] == stock_code or 
+                            record['股票名稱'] == stock_name):
+                            user_holdings.append(record)
+                    elif record['股票名稱'] == specific_stock:
                         user_holdings.append(record)
                 else:
                     user_holdings.append(record)
         
         if not user_holdings:
-            if specific_stock and not target_name:
+            if specific_stock:
                 return f"📊 您沒有持有 {specific_stock}"
             else:
                 return "📊 您目前沒有任何持股"
@@ -1222,7 +999,11 @@ def get_user_holdings(user_id, group_id, specific_stock=None):
             avg_cost = float(holding['平均成本'])
             cost = float(holding['總成本'])
             
-            current_price = get_stock_price(stock_code, stock_name)
+            # 取得市場資訊
+            stock_info = get_stock_info(stock_code if stock_code else stock_name)
+            market = stock_info['market'] if stock_info else None
+            
+            current_price = get_stock_price(stock_code, stock_name, market)
             
             if current_price > 0:
                 current_value = shares * current_price
@@ -1326,7 +1107,11 @@ def get_others_holdings(target_name, group_id):
             avg_cost = float(holding['平均成本'])
             cost = float(holding['總成本'])
             
-            current_price = get_stock_price(stock_code, stock_name)
+            # 取得市場資訊
+            stock_info = get_stock_info(stock_code if stock_code else stock_name)
+            market = stock_info['market'] if stock_info else None
+            
+            current_price = get_stock_price(stock_code, stock_name, market)
             
             if current_price > 0:
                 current_value = shares * current_price
@@ -1415,7 +1200,7 @@ def get_all_group_holdings(group_id):
         records = holdings_sheet.get_all_records()
         
         # 整理群組內所有用戶的持股
-        user_holdings_map = {}  # {user_name: {user_id, holdings: [], total_value}}
+        user_holdings_map = {}
         
         for record in records:
             if record['群組ID'] == group_id:
@@ -1435,8 +1220,10 @@ def get_all_group_holdings(group_id):
                 avg_cost = float(record['平均成本'])
                 cost = float(record['總成本'])
                 
-                # 取得目前股價
-                current_price = get_stock_price(stock_code, stock_name)
+                # 取得市場資訊和目前股價
+                stock_info = get_stock_info(stock_code if stock_code else stock_name)
+                market = stock_info['market'] if stock_info else None
+                current_price = get_stock_price(stock_code, stock_name, market)
                 current_value = shares * current_price if current_price > 0 else cost
                 
                 user_holdings_map[user_name]['holdings'].append({
@@ -1462,7 +1249,7 @@ def get_all_group_holdings(group_id):
         # 統計資訊
         total_group_value = 0
         total_group_cost = 0
-        stock_statistics = {}  # {stock_name: total_shares}
+        stock_statistics = {}
         
         # 依用戶顯示持股
         for user_name, data in sorted(user_holdings_map.items()):
@@ -1805,7 +1592,7 @@ def execute_sell(vote, vote_id):
             except Exception as e:
                 print(f"⚠️ 記錄賣出交易失敗: {e}")
         
-        # 更新持股 - 這裡是關鍵！
+        # 更新持股
         update_result = update_holdings(
             vote['initiator_id'], 
             vote['initiator_name'], 
@@ -1954,18 +1741,18 @@ def send_reply_message(reply_token, message_text):
 def health_check():
     return jsonify({
         "status": "running",
-        "message": "🤖 完整版股票管理 LINE Bot v3.5",
-        "version": "3.5",
+        "message": "🤖 動態股票查詢 LINE Bot v4.0",
+        "version": "4.0",
         "timestamp": datetime.now().isoformat(),
         "features": [
             "買入股票（支援批次）",
             "賣出投票（支援批次）",
             "持股查詢（支援查看他人）",
             "投票系統",
-            "即時股價（動態爬取）",
+            "即時股價（動態查詢）",
             "零股支援",
             "查看他人持股功能",
-            "動態股票清單"
+            "完全動態股票查詢（無預設清單）"
         ],
         "sheets_connected": bool(transaction_sheet and holdings_sheet),
         "environment_vars": {
@@ -1974,7 +1761,7 @@ def health_check():
             "SPREADSHEET_ID": bool(SPREADSHEET_ID),
             "GOOGLE_CREDENTIALS": bool(GOOGLE_CREDENTIALS_JSON)
         },
-        "stock_codes_count": len(STOCK_CODES)
+        "cache_size": len(STOCK_CACHE)
     })
 
 @app.route("/api/webhook", methods=['POST'])
@@ -2032,7 +1819,8 @@ def webhook():
 
 💡 提示：
 • 數量可用「張」或「股」
-• 只寫數字時，小於1000視為張數"""
+• 只寫數字時，小於1000視為張數
+• 支援所有上市櫃股票"""
 
                 # 賣出指令
                 elif message_text.startswith('/賣出'):
@@ -2076,62 +1864,56 @@ def webhook():
                         stock_input = ' '.join(parts[1:])  # 支援多字股票名稱
                         print(f"查詢股價: {stock_input}")
                         
-                        # 特殊處理：如果輸入是純數字，當作股票代號
-                        if stock_input.isdigit() and len(stock_input) == 4:
-                            stock_code = stock_input
-                            stock_name = stock_input  # 暫時用代號當名稱
-                            print(f"直接使用股票代號: {stock_code}")
-                        else:
-                            # 取得股票代號
-                            stock_code, stock_name = get_stock_code(stock_input)
-                            print(f"查詢結果 - 代號: {stock_code}, 名稱: {stock_name}")
+                        # 取得股票資訊
+                        stock_info = get_stock_info(stock_input)
                         
-                        # 嘗試取得股價
-                        if stock_code or stock_input.isdigit():
-                            # 如果有代號，或輸入是數字，嘗試查詢
-                            query_code = stock_code if stock_code else stock_input
-                            price = get_stock_price(query_code, stock_name)
+                        if stock_info:
+                            stock_code = stock_info['code']
+                            stock_name = stock_info['name']
+                            market = stock_info['market']
+                            
+                            # 取得股價
+                            price = get_stock_price(stock_code, stock_name, market)
                             
                             if price > 0:
-                                # 成功取得股價
-                                display_name = stock_name if stock_name != query_code else f"股票 {query_code}"
+                                market_text = "上市" if market == 'tse' else "上櫃"
                                 response_text = f"""📊 股價查詢結果
 
-🏢 股票：{display_name} ({query_code})
+🏢 股票：{stock_name} ({stock_code})
+📍 市場：{market_text}
 💰 目前股價：{price:.2f}元
 ⏰ 查詢時間：{datetime.now().strftime('%H:%M:%S')}"""
-                                
-                                # 如果原本沒有這支股票，加入快取
-                                if query_code not in STOCK_CODES:
-                                    STOCK_CODES[query_code] = stock_name
-                                    STOCK_NAMES[stock_name] = query_code
-                                    print(f"新增股票到快取: {query_code} {stock_name}")
                             else:
-                                # 無法取得股價
-                                response_text = f"""❌ 無法取得股價：{stock_input}
+                                response_text = f"""❌ 無法取得股價
+
+股票：{stock_name} ({stock_code})
 
 可能原因：
-1. 股票代號或名稱錯誤
-2. 股市休市中
-3. 網路連線問題
+1. 股市休市中
+2. 網路連線問題
+3. 資料來源暫時無法使用
 
-請確認：
-• 上市股票代號（如：2330）
-• 上櫃股票代號（如：3078）
-• 正確的股票名稱"""
+請稍後再試"""
                         else:
-                            # 完全找不到股票
                             response_text = f"""❌ 找不到股票：{stock_input}
 
-請使用：
-• 4位數股票代號（如：2330）
-• 完整股票名稱（如：台積電）
+請確認：
+1. 輸入正確的股票代號（4位數字）
+2. 輸入正確的股票名稱
 
-💡 提示：
-• 上市股票：2330（台積電）、2317（鴻海）
-• 上櫃股票：3078（波若威）、6547（高端疫苗）"""
+範例：
+• /股價 2330（代號查詢）
+• /股價 台積電（名稱查詢）"""
                     else:
-                        response_text = "❌ 請輸入要查詢的股票\n\n格式：/股價 股票名稱\n範例：/股價 台積電 或 /股價 2330"
+                        response_text = """❌ 請輸入要查詢的股票
+
+格式：/股價 [股票代號或名稱]
+
+範例：
+• /股價 2330
+• /股價 台積電
+• /股價 3078
+• /股價 波若威"""
 
                 # 投票相關
                 elif message_text.startswith('/贊成'):
@@ -2163,20 +1945,33 @@ def webhook():
 
                 # 股票清單
                 elif message_text == '/股票清單':
-                    if not STOCK_CODES:
-                        init_stock_list()
-                    
-                    stock_list = f"📋 支援的股票清單（共 {len(STOCK_CODES)} 支）：\n\n"
-                    count = 0
-                    for code, name in sorted(STOCK_CODES.items())[:50]:  # 只顯示前50支
-                        stock_list += f"• {code} - {name}\n"
-                        count += 1
-                    
-                    if len(STOCK_CODES) > 50:
-                        stock_list += f"\n... 還有 {len(STOCK_CODES) - 50} 支股票\n"
-                        stock_list += "\n💡 系統支援所有上市櫃股票，可直接輸入代號或名稱查詢"
-                    
-                    response_text = stock_list
+                    response_text = """📋 股票查詢說明
+
+本系統支援所有台灣上市櫃股票！
+
+🔍 查詢方式：
+1. 使用股票代號（4位數字）
+   例如：2330、2454、3078
+
+2. 使用股票名稱
+   例如：台積電、聯發科、波若威
+
+📈 熱門股票範例：
+【上市】
+• 2330 台積電
+• 2454 聯發科
+• 2317 鴻海
+• 2308 台達電
+• 2882 國泰金
+
+【上櫃】
+• 3078 波若威
+• 6547 高端疫苗
+• 5274 信驊
+• 8299 群聯
+• 6488 環球晶
+
+💡 任何台灣股票都可以查詢，不限於上述清單！"""
 
                 # 幫助
                 elif message_text == '/幫助' or message_text == '/help':
@@ -2189,8 +1984,8 @@ def webhook():
 📊 查詢指令：
 • /持股 - 查看自己的所有持股
 • /持股 股票名稱 - 查看自己特定股票
-• /持股 用戶名稱 - 查看他人持股 🆕
-• /持股 全部 - 查看群組所有人持股 🆕
+• /持股 用戶名稱 - 查看他人持股
+• /持股 全部 - 查看群組所有人持股
 • /股價 股票名稱 - 查詢即時股價
 
 🗳️ 投票指令：
@@ -2200,19 +1995,15 @@ def webhook():
 • /投票 - 列出進行中投票
 
 ℹ️ 其他指令：
-• /股票清單 - 支援的股票
+• /股票清單 - 查詢說明
 • /測試 - 系統診斷
 • /幫助 - 顯示此說明
 
-💡 批次交易範例：
-• /買入 台積電 2 580元 3 575元 加碼
-• /賣出 2330 1 600元 2 605元
-
-🆕 查看他人持股範例：
-• /持股 王小明 - 查看王小明的持股
-• /持股 全部 - 查看群組所有人的持股總覽
-
-📌 系統支援所有上市櫃股票（動態更新）"""
+💡 系統特色：
+• 支援所有台灣上市櫃股票
+• 動態即時查詢股價
+• 支援批次交易
+• 群組投票決策機制"""
 
                 # 測試
                 elif message_text == '/測試':
@@ -2220,18 +2011,22 @@ def webhook():
                     test_results += f"✅ Webhook 連接成功\n"
                     test_results += f"✅ Google Sheets: {'已連接' if holdings_sheet else '未連接'}\n"
                     test_results += f"✅ LINE Token: {'已設置' if LINE_CHANNEL_ACCESS_TOKEN else '未設置'}\n"
-                    test_results += f"✅ 股票清單: {len(STOCK_CODES)} 支股票\n"
+                    test_results += f"✅ 快取股票數: {len(STOCK_CACHE)} 支\n"
                     test_results += f"\n📊 股價測試（台積電 2330）：\n"
                     
-                    test_price = get_stock_price('2330', '台積電')
-                    if test_price > 0:
-                        test_results += f"✅ 股價抓取成功：{test_price}元\n"
+                    stock_info = get_stock_info('2330')
+                    if stock_info:
+                        test_price = get_stock_price(stock_info['code'], stock_info['name'], stock_info['market'])
+                        if test_price > 0:
+                            test_results += f"✅ 股價抓取成功：{test_price}元\n"
+                        else:
+                            test_results += f"❌ 股價抓取失敗\n"
                     else:
-                        test_results += f"❌ 股價抓取失敗\n"
+                        test_results += f"❌ 無法取得股票資訊\n"
                     
                     test_results += f"\n🌐 運行環境：Vercel\n"
                     test_results += f"⏰ 系統時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    test_results += f"📦 版本：3.5 (動態股票清單)"
+                    test_results += f"📦 版本：4.0 (完全動態查詢)"
                     
                     response_text = test_results
 
