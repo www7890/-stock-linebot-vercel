@@ -331,38 +331,40 @@ def search_stock_from_web(keyword):
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
         
+        print(f"開始網路搜尋: {keyword}")
+        
         # 使用證交所的搜尋 API
         search_url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
         
-        # 嘗試不同的搜尋策略
-        possible_codes = []
-        
         # 如果是數字，可能是股票代號
         if keyword.isdigit():
-            possible_codes.append(keyword)
-        
-        # 搜尋上市股票
-        for code in possible_codes:
-            params = {'ex_ch': f'tse_{code}.tw', 'json': '1', 'delay': '0'}
+            # 嘗試上市股票
+            params = {'ex_ch': f'tse_{keyword}.tw', 'json': '1', 'delay': '0'}
             response = requests.get(search_url, params=params, headers=headers, timeout=5)
             if response.status_code == 200:
                 data = response.json()
                 if 'msgArray' in data and len(data['msgArray']) > 0:
                     stock_data = data['msgArray'][0]
                     if 'c' in stock_data and 'n' in stock_data:
-                        return stock_data['c'], stock_data['n']
-        
-        # 搜尋上櫃股票
-        for code in possible_codes:
-            params = {'ex_ch': f'otc_{code}.tw', 'json': '1', 'delay': '0'}
+                        code = stock_data['c']
+                        name = stock_data['n']
+                        print(f"找到上市股票: {code} {name}")
+                        return code, name
+            
+            # 嘗試上櫃股票
+            params = {'ex_ch': f'otc_{keyword}.tw', 'json': '1', 'delay': '0'}
             response = requests.get(search_url, params=params, headers=headers, timeout=5)
             if response.status_code == 200:
                 data = response.json()
                 if 'msgArray' in data and len(data['msgArray']) > 0:
                     stock_data = data['msgArray'][0]
                     if 'c' in stock_data and 'n' in stock_data:
-                        return stock_data['c'], stock_data['n']
+                        code = stock_data['c']
+                        name = stock_data['n']
+                        print(f"找到上櫃股票: {code} {name}")
+                        return code, name
         
+        print(f"網路搜尋無結果: {keyword}")
         return None, keyword
         
     except Exception as e:
@@ -2074,33 +2076,62 @@ def webhook():
                         stock_input = ' '.join(parts[1:])  # 支援多字股票名稱
                         print(f"查詢股價: {stock_input}")
                         
-                        # 取得股票代號
-                        stock_code, stock_name = get_stock_code(stock_input)
-                        print(f"股票代號: {stock_code}, 名稱: {stock_name}")
+                        # 特殊處理：如果輸入是純數字，當作股票代號
+                        if stock_input.isdigit() and len(stock_input) == 4:
+                            stock_code = stock_input
+                            stock_name = stock_input  # 暫時用代號當名稱
+                            print(f"直接使用股票代號: {stock_code}")
+                        else:
+                            # 取得股票代號
+                            stock_code, stock_name = get_stock_code(stock_input)
+                            print(f"查詢結果 - 代號: {stock_code}, 名稱: {stock_name}")
                         
-                        if stock_code:
-                            price = get_stock_price(stock_code, stock_name)
+                        # 嘗試取得股價
+                        if stock_code or stock_input.isdigit():
+                            # 如果有代號，或輸入是數字，嘗試查詢
+                            query_code = stock_code if stock_code else stock_input
+                            price = get_stock_price(query_code, stock_name)
+                            
                             if price > 0:
+                                # 成功取得股價
+                                display_name = stock_name if stock_name != query_code else f"股票 {query_code}"
                                 response_text = f"""📊 股價查詢結果
 
-🏢 股票：{stock_name} ({stock_code})
+🏢 股票：{display_name} ({query_code})
 💰 目前股價：{price:.2f}元
 ⏰ 查詢時間：{datetime.now().strftime('%H:%M:%S')}"""
+                                
+                                # 如果原本沒有這支股票，加入快取
+                                if query_code not in STOCK_CODES:
+                                    STOCK_CODES[query_code] = stock_name
+                                    STOCK_NAMES[stock_name] = query_code
+                                    print(f"新增股票到快取: {query_code} {stock_name}")
                             else:
-                                response_text = f"❌ 無法取得 {stock_name} ({stock_code}) 的即時股價\n\n可能原因：\n1. 股市休市中\n2. 網路連線問題\n3. 股票代號錯誤"
-                        else:
-                            # 沒有找到股票代號，可能是新股或錯誤
-                            response_text = f"""❌ 找不到股票：{stock_input}
+                                # 無法取得股價
+                                response_text = f"""❌ 無法取得股價：{stock_input}
+
+可能原因：
+1. 股票代號或名稱錯誤
+2. 股市休市中
+3. 網路連線問題
 
 請確認：
-1. 股票名稱或代號是否正確
-2. 是否為新上市櫃股票
+• 上市股票代號（如：2330）
+• 上櫃股票代號（如：3078）
+• 正確的股票名稱"""
+                        else:
+                            # 完全找不到股票
+                            response_text = f"""❌ 找不到股票：{stock_input}
 
-您可以試試：
-• 使用股票代號查詢（如：2330）
-• 使用完整股票名稱（如：台積電）"""
+請使用：
+• 4位數股票代號（如：2330）
+• 完整股票名稱（如：台積電）
+
+💡 提示：
+• 上市股票：2330（台積電）、2317（鴻海）
+• 上櫃股票：3078（波若威）、6547（高端疫苗）"""
                     else:
-                        response_text = "❌ 請輸入要查詢的股票\n\n格式：/股價 股票名稱\n範例：/股價 台積電"
+                        response_text = "❌ 請輸入要查詢的股票\n\n格式：/股價 股票名稱\n範例：/股價 台積電 或 /股價 2330"
 
                 # 投票相關
                 elif message_text.startswith('/贊成'):
